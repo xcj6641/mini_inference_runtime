@@ -1,0 +1,21 @@
+2026-07-12 19:23:45,594 INFO app.runtime.pytorch_model_runner - Loading model model=Qwen/Qwen2.5-0.5B-Instruct device=cuda dtype=torch.float16
+2026-07-12 19:23:47,805 INFO app.runtime.pytorch_model_runner - Model loaded model=Qwen/Qwen2.5-0.5B-Instruct eos_token_id={151645}
+2026-07-12 19:23:47,971 INFO app.runtime.pytorch_model_runner - [prefill] input_shape=(1, 38) logits_shape=(1, 38, 151936) next_token_id=32 cache_length=38
+2026-07-12 19:23:48,001 INFO app.runtime.pytorch_model_runner - [decode] input_shape=(1, 1) logits_shape=(1, 1, 151936) next_token_id=1376 cache_length=39
+2026-07-12 19:23:48,022 INFO app.runtime.pytorch_model_runner - [decode] input_shape=(1, 1) logits_shape=(1, 1, 151936) next_token_id=19083 cache_length=40
+2026-07-12 19:23:48,042 INFO app.runtime.pytorch_model_runner - [decode] input_shape=(1, 1) logits_shape=(1, 1, 151936) next_token_id=6500 cache_length=41
+2026-07-12 19:23:48,063 INFO app.runtime.pytorch_model_runner - [decode] input_shape=(1, 1) logits_shape=(1, 1, 151936) next_token_id=10533 cache_length=42
+2026-07-12 19:23:48,083 INFO app.runtime.pytorch_model_runner - [decode] input_shape=(1, 1) logits_shape=(1, 1, 151936) next_token_id=821 cache_length=43
+2026-07-12 19:23:48,103 INFO app.runtime.pytorch_model_runner - [decode] input_shape=(1, 1) logits_shape=(1, 1, 151936) next_token_id=304 cache_length=44
+2026-07-12 19:23:48,125 INFO app.runtime.pytorch_model_runner - [decode] input_shape=(1, 1) logits_shape=(1, 1, 151936) next_token_id=4938 cache_length=45
+2026-07-12 19:23:48,148 INFO app.runtime.pytorch_model_runner - [decode] input_shape=(1, 1) logits_shape=(1, 1, 151936) next_token_id=11 cache_length=46
+2026-07-12 19:23:48,169 INFO app.runtime.pytorch_model_runner - [decode] input_shape=(1, 1) logits_shape=(1, 1, 151936) next_token_id=8241 cache_length=47
+2026-07-12 19:23:48,190 INFO app.runtime.pytorch_model_runner - [decode] input_shape=(1, 1) logits_shape=(1, 1, 151936) next_token_id=4937 cache_length=48
+2026-07-12 19:23:48,211 INFO app.runtime.pytorch_model_runner - [decode] input_shape=(1, 1) logits_shape=(1, 1, 151936) next_token_id=2615 cache_length=49
+2026-07-12 19:23:48,234 INFO app.runtime.pytorch_model_runner - [decode] input_shape=(1, 1) logits_shape=(1, 1, 151936) next_token_id=311 cache_length=50
+2026-07-12 19:23:48,254 INFO app.runtime.pytorch_model_runner - [decode] input_shape=(1, 1) logits_shape=(1, 1, 151936) next_token_id=13814 cache_length=51
+2026-07-12 19:23:48,274 INFO app.runtime.pytorch_model_runner - [decode] input_shape=(1, 1) logits_shape=(1, 1, 151936) next_token_id=24758 cache_length=52
+2026-07-12 19:23:48,295 INFO app.runtime.pytorch_model_runner - [decode] input_shape=(1, 1) logits_shape=(1, 1, 151936) next_token_id=821 cache_length=53
+2026-07-12 19:23:48,316 INFO app.runtime.pytorch_model_runner - [decode] input_shape=(1, 1) logits_shape=(1, 1, 151936) next_token_id=13 cache_length=54
+2026-07-12 19:23:48,336 INFO app.runtime.pytorch_model_runner - [decode] input_shape=(1, 1) logits_shape=(1, 1, 151936) next_token_id=151645 cache_length=55
+2026-07-12 19:23:48,336 INFO root - [result] finish_reason=eos generated_tokens=18 text='A key-value cache stores data in memory, providing fast access to frequently accessed data.'
