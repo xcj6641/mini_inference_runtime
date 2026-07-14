@@ -5,6 +5,7 @@ import time
 
 from app.runtime.pytorch_model_runner import PyTorchModelRunner
 from app.runtime.generation import generate
+from app.runtime.kv_cache_utils import get_cache_length
 
 def synchronize(device: torch.device) -> None:
     if device.type == "cuda":
@@ -32,11 +33,11 @@ def test_real_prefill_returns_logits(real_runner) -> None:
 
 
 
-def get_cache_length(cache) -> int:
-    if hasattr(cache, "get_seq_length"):
-        return int(cache.get_seq_length())
+# def get_cache_length(cache) -> int:
+#     if hasattr(cache, "get_seq_length"):
+#         return int(cache.get_seq_length())
 
-    return int(cache[0][0].shape[-2])
+#     return int(cache[0][0].shape[-2])
 
 @pytest.mark.integration
 def test_decode_adds_one_token(real_runner) -> None:

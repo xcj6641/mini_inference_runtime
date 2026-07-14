@@ -26,3 +26,15 @@ class GenerationResult:
     generated_token_ids: list[int]
     text: str
     finish_reason: str
+
+from enum import Enum, auto
+
+
+class RequestState(Enum):
+    WAITING = auto()
+    PREFILLING = auto()
+    DECODING = auto()
+    FINISHED = auto()
+    CANCELLED = auto()
+    FAILED = auto()
+

@@ -7,12 +7,16 @@ import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from app.runtime.types import DecodeOutput, PrefillOutput
+from app.runtime.model_runner import ModelRunner
 
+from app.runtime.kv_cache_utils import (
+    get_kv_sequence_length,
+)
 
 logger = logging.getLogger(__name__)
 
 
-class PyTorchModelRunner:
+class PyTorchModelRunner(ModelRunner):
     def __init__(
         self,
         model_name: str,
@@ -151,7 +155,7 @@ class PyTorchModelRunner:
         last_token_logits = logits[:, -1, :]
         next_token_id = int(torch.argmax(last_token_logits, dim=-1).item())
 
-        cache_length = self._get_cache_length(outputs.past_key_values)
+        cache_length = get_kv_sequence_length(outputs.past_key_values)
 
         logger.info(
             "[prefill] input_shape=%s logits_shape=%s "
@@ -194,7 +198,7 @@ class PyTorchModelRunner:
         last_token_logits = logits[:, -1, :]
         next_token_id = int(torch.argmax(last_token_logits, dim=-1).item())
 
-        cache_length = self._get_cache_length(outputs.past_key_values)
+        cache_length = get_kv_sequence_length(outputs.past_key_values)
 
         logger.info(
             "[decode] input_shape=%s logits_shape=%s "
@@ -248,23 +252,3 @@ class PyTorchModelRunner:
                 "decode requires past_key_values returned by prefill "
                 "or a previous decode step"
             )
-
-    @staticmethod
-    def _get_cache_length(past_key_values: Any) -> int | str:
-        if past_key_values is None:
-            return "none"
-
-        get_seq_length = getattr(
-            past_key_values,
-            "get_seq_length",
-            None,
-        )
-
-        if callable(get_seq_length):
-            return int(get_seq_length())
-
-        try:
-            first_layer_key = past_key_values[0][0]
-            return int(first_layer_key.shape[-2])
-        except (TypeError, IndexError, AttributeError):
-            return "unknown"
