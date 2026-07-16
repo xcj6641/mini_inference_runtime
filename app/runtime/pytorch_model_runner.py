@@ -3,14 +3,16 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from app.runtime.batch import DecodeBatch
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from app.runtime.types import DecodeOutput, PrefillOutput
+from app.runtime.types import BatchedDecodeOutput, BatchedPrefillOutput, DecodeOutput, PrefillOutput
 from app.runtime.model_runner import ModelRunner
 
 from app.runtime.kv_cache_utils import (
     get_kv_sequence_length,
+    move_cache_to_device,
 )
 
 logger = logging.getLogger(__name__)
@@ -80,6 +82,20 @@ class PyTorchModelRunner(ModelRunner):
             return {eos_token_id}
 
         return set(eos_token_id)
+
+    @property
+    def pad_token_id(self) -> int | None:
+        pad_token_id = self.tokenizer.pad_token_id
+
+        if pad_token_id is None:
+            return None
+
+        if not isinstance(pad_token_id, int):
+            raise TypeError(
+                "Expected tokenizer.pad_token_id to be an int"
+            )
+
+        return pad_token_id
 
     def encode_prompt(self, prompt: str) -> torch.Tensor:
         encoded = self.tokenizer(
@@ -173,6 +189,66 @@ class PyTorchModelRunner(ModelRunner):
         )
 
     @torch.inference_mode()
+    def prefill_batch(
+        self,
+        batch: PrefillBatch,
+    ) -> BatchedPrefillOutput:
+        input_ids = batch.input_ids.to(self.device)
+
+        attention_mask = batch.attention_mask.to(
+            self.device
+        )
+
+        position_ids = batch.position_ids
+
+        if position_ids is not None:
+            position_ids = position_ids.to(self.device)
+
+        outputs = self.model(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            position_ids=position_ids,
+            use_cache=True,
+            return_dict=True,
+        )
+
+        logits = outputs.logits
+
+        expected_batch_size = batch.batch_size
+
+        if logits.ndim != 3:
+            raise RuntimeError(
+                "Expected logits with shape "
+                "[batch_size, sequence_length, vocab_size], "
+                f"got {tuple(logits.shape)}"
+            )
+
+        if logits.shape[0] != expected_batch_size:
+            raise RuntimeError(
+                "Model output batch size does not match "
+                "input batch size"
+            )
+
+        last_token_logits = logits[:, -1, :]
+
+        next_token_ids_tensor = torch.argmax(
+            last_token_logits,
+            dim=-1,
+        )
+
+        next_token_ids = [
+            int(token_id)
+            for token_id
+            in next_token_ids_tensor.detach().cpu().tolist()
+        ]
+
+        return BatchedPrefillOutput(
+            next_token_ids=next_token_ids,
+            past_key_values=outputs.past_key_values,
+            logits=logits,
+        )
+
+    @torch.inference_mode()
     def decode(
         self,
         input_ids: torch.Tensor,
@@ -211,6 +287,72 @@ class PyTorchModelRunner(ModelRunner):
 
         return DecodeOutput(
             next_token_id=next_token_id,
+            past_key_values=outputs.past_key_values,
+            logits=logits,
+        )
+
+    @torch.inference_mode()
+    def decode_batch(
+        self,
+        batch: DecodeBatch,
+    ) -> BatchedDecodeOutput:
+        input_ids = batch.input_ids.to(self.device)
+
+        past_key_values = move_cache_to_device(
+            batch.past_key_values,
+            self.device,
+        )
+
+        attention_mask = batch.attention_mask
+        if attention_mask is not None:
+            attention_mask = attention_mask.to(
+                self.device
+            )
+
+        position_ids = batch.position_ids
+        if position_ids is not None:
+            position_ids = position_ids.to(
+                self.device
+            )
+
+        outputs = self.model(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            position_ids=position_ids,
+            past_key_values=past_key_values,
+            use_cache=True,
+            return_dict=True,
+        )
+
+        logits = outputs.logits
+
+        if logits.shape[:2] != (
+            batch.batch_size,
+            1,
+        ):
+            raise RuntimeError(
+                "Expected decode logits with shape "
+                "[batch_size, 1, vocab_size], "
+                f"got {tuple(logits.shape)}"
+            )
+
+        last_token_logits = logits[:, -1, :]
+
+        next_token_ids_tensor = torch.argmax(
+            last_token_logits,
+            dim=-1,
+        )
+
+        next_token_ids = [
+            int(token_id)
+            for token_id in next_token_ids_tensor
+            .detach()
+            .cpu()
+            .tolist()
+        ]
+
+        return BatchedDecodeOutput(
+            next_token_ids=next_token_ids,
             past_key_values=outputs.past_key_values,
             logits=logits,
         )

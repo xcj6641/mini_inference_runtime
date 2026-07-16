@@ -12,6 +12,11 @@ class PrefillOutput:
     past_key_values: Any
     logits: torch.Tensor
 
+@dataclass(frozen=True)
+class BatchedPrefillOutput:
+    next_token_ids: list[int]
+    past_key_values: Any
+    logits: torch.Tensor
 
 @dataclass(frozen=True)
 class DecodeOutput:
@@ -19,6 +24,11 @@ class DecodeOutput:
     past_key_values: Any
     logits: torch.Tensor
 
+@dataclass(frozen=True)
+class BatchedDecodeOutput:
+    next_token_ids: list[int]
+    past_key_values: Any
+    logits: torch.Tensor
 
 @dataclass(frozen=True)
 class GenerationResult:
