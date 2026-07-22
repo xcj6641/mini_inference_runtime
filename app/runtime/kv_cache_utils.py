@@ -136,7 +136,6 @@ def calculate_actual_kv_bytes(
         for layer_info in layer_infos
     )
 
-
 def estimate_kv_bytes_per_token(
     *,
     num_layers: int,
@@ -163,7 +162,6 @@ def estimate_kv_bytes_per_token(
         * bytes_per_element
     )
 
-
 def estimate_total_kv_bytes(
     *,
     sequence_length: int,
@@ -181,7 +179,6 @@ def estimate_total_kv_bytes(
         head_dim=head_dim,
         bytes_per_element=bytes_per_element,
     )
-
 
 def get_cuda_memory_snapshot(
     device: torch.device,
