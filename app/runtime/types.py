@@ -42,7 +42,7 @@ from enum import Enum, auto
 
 class RequestState(Enum):
     WAITING = auto()
-    PREFILLING = auto()
+    PREFILLING = auto() # one time, may not need to be persistent
     DECODING = auto()
     FINISHED = auto()
     CANCELLED = auto()
