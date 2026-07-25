@@ -40,6 +40,16 @@ class PyTorchModelRunner(ModelRunner):
             self.model_name,
         )
 
+        if self.tokenizer.pad_token_id is None:
+            if self.tokenizer.eos_token_id is None:
+                raise RuntimeError(
+                    "Tokenizer has neither pad nor EOS token"
+                )
+
+            self.tokenizer.pad_token_id = (
+                self.tokenizer.eos_token_id
+            )
+
         self.model = AutoModelForCausalLM.from_pretrained(
             self.model_name,
             torch_dtype=self.dtype,
@@ -85,17 +95,14 @@ class PyTorchModelRunner(ModelRunner):
 
     @property
     def pad_token_id(self) -> int | None:
-        pad_token_id = self.tokenizer.pad_token_id
+        value = self.tokenizer.pad_token_id
 
-        if pad_token_id is None:
-            return None
-
-        if not isinstance(pad_token_id, int):
-            raise TypeError(
-                "Expected tokenizer.pad_token_id to be an int"
+        if value is None:
+            raise RuntimeError(
+                "Tokenizer has no pad_token_id"
             )
 
-        return pad_token_id
+        return int(value)
 
     def encode_prompt(self, prompt: str) -> torch.Tensor:
         encoded = self.tokenizer(

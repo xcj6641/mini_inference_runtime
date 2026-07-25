@@ -4,6 +4,10 @@ from collections import deque
 
 from app.runtime.request import Request, RequestState
 from app.runtime.scheduler_result import StepResult
+from app.runtime.kv_cache_utils import (
+    split_legacy_kv_cache,
+    get_kv_sequence_length,
+)
 
 
 class ContinuousScheduler:
@@ -12,16 +16,25 @@ class ContinuousScheduler:
         runner,
         batch_builder,
         max_prefill_batch_size: int = 4,
+        max_decode_batch_size: int = 4,
     ) -> None:
         if max_prefill_batch_size <= 0:
             raise ValueError(
                 "max_prefill_batch_size must be positive"
             )
 
+        if max_decode_batch_size <= 0:
+            raise ValueError(
+                "max_decode_batch_size must be positive"
+            )
+
         self.runner = runner
         self.batch_builder = batch_builder
         self.max_prefill_batch_size = (
             max_prefill_batch_size
+        )
+        self.max_decode_batch_size = (
+            max_decode_batch_size
         )
 
         self.waiting: deque[Request] = deque()
@@ -91,7 +104,9 @@ class ContinuousScheduler:
             return [], {}
 
         batch = self.batch_builder.build_prefill_batch(
-            requests
+            requests,
+            pad_token_id=self.runner.pad_token_id,
+            device=self.runner.device,
         )
 
         output = self.runner.prefill_batch(batch)
@@ -102,9 +117,15 @@ class ContinuousScheduler:
                 "match request count"
             )
 
-        if len(output.past_key_values) != len(requests):
+        per_request_caches = (
+            split_legacy_kv_cache(
+                output.past_key_values
+            )
+        )
+
+        if len(per_request_caches) != len(requests):
             raise RuntimeError(
-                "Prefill output KV-cache count does not "
+                "Split prefill KV-cache count does not "
                 "match request count"
             )
 
@@ -117,8 +138,9 @@ class ContinuousScheduler:
             )
 
             request.attach_kv_cache(
-                output.past_key_values[index]
+                per_request_caches[index]
             )
+
             request.append_generated_token(
                 next_token_id
             )
@@ -133,12 +155,15 @@ class ContinuousScheduler:
             prefetched_request_ids.append(
                 request.request_id
             )
+
             generated_token_ids[
                 request.request_id
             ] = next_token_id
 
             if request.state == RequestState.DECODING:
-                self.active[request.request_id] = request
+                self.active[
+                    request.request_id
+                ] = request
             else:
                 self._complete_request(request)
 
@@ -147,19 +172,52 @@ class ContinuousScheduler:
             generated_token_ids,
         )
 
+    def _select_decode_requests(
+        self,
+    ) -> list[Request]:
+        selected: list[Request] = []
+        target_kv_length: int | None = None
+
+        for request in self.active.values():
+            if request.state != RequestState.DECODING:
+                continue
+
+            if request.past_key_values is None:
+                raise RuntimeError(
+                    f"Request {request.request_id} "
+                    "has no KV cache"
+                )
+
+            kv_length = get_kv_sequence_length(
+                request.past_key_values
+            )
+
+            if target_kv_length is None:
+                target_kv_length = kv_length
+
+            if kv_length != target_kv_length:
+                continue
+
+            selected.append(request)
+
+            if len(selected) >= self.max_decode_batch_size:
+                break
+
+        return selected
+
     def _run_decode(
         self,
         requests: list[Request],
-    ) -> tuple[
-        list[str],
-        list[str],
-        dict[str, int],
-    ]:
+    ) -> tuple[list[str], dict[str, int]]:
         if not requests:
-            return [], [], {}
+            return [], {}
 
-        batch = self.batch_builder.build_decode_batch(
-            requests
+        batch = (
+            self.batch_builder
+            .build_equal_length_decode_batch(
+                requests,
+                device=self.runner.device,
+            )
         )
 
         output = self.runner.decode_batch(batch)
@@ -170,50 +228,52 @@ class ContinuousScheduler:
                 "match request count"
             )
 
-        if len(output.past_key_values) != len(requests):
+        per_request_caches = (
+            split_legacy_kv_cache(
+                output.past_key_values
+            )
+        )
+
+        if len(per_request_caches) != len(requests):
             raise RuntimeError(
-                "Decode output KV-cache count does not "
-                "match request count"
+                "Decode output KV cache batch size "
+                "does not match request count"
             )
 
-        decoded_request_ids: list[str] = []
-        finished_request_ids: list[str] = []
         generated_token_ids: dict[str, int] = {}
+        decoded_request_ids: list[str] = []
 
         for index, request in enumerate(requests):
             next_token_id = int(
                 output.next_token_ids[index]
             )
 
-            request.past_key_values = (
-                output.past_key_values[index]
+            request.attach_kv_cache(
+                per_request_caches[index]
             )
 
             request.append_generated_token(
-                next_token_id
+                token_id=next_token_id  
             )
+
+            decoded_request_ids.append(
+                request.request_id
+            )
+            
+            generated_token_ids[
+                request.request_id
+            ] = next_token_id
 
             self._update_finish_state(
                 request=request,
                 generated_token_id=next_token_id,
             )
 
-            decoded_request_ids.append(
-                request.request_id
-            )
-            generated_token_ids[
-                request.request_id
-            ] = next_token_id
-
             if request.state == RequestState.FINISHED:
-                finished_request_ids.append(
-                    request.request_id
-                )
                 self._complete_request(request)
 
         return (
             decoded_request_ids,
-            finished_request_ids,
             generated_token_ids,
         )
 
@@ -226,21 +286,16 @@ class ContinuousScheduler:
             None,
         )
 
-        request.past_key_values = None
-
-        if hasattr(request, "attention_mask"):
-            request.attention_mask = None
+        request.release_kv_cache()
 
         self.completed[request.request_id] = request
 
     def step(self) -> StepResult:
         self.tick_id += 1
 
-        decode_requests = [
-            request
-            for request in self.active.values()
-            if request.state == RequestState.DECODING
-        ]
+        decode_requests = (
+            self._select_decode_requests()
+        )
 
         (
             prefetched_request_ids,
@@ -249,20 +304,23 @@ class ContinuousScheduler:
 
         (
             decoded_request_ids,
-            decode_finished_request_ids,
             decode_generated_token_ids,
         ) = self._run_decode(decode_requests)
 
-        prefill_finished_request_ids = [
-            request_id
-            for request_id in prefetched_request_ids
-            if request_id in self.completed
-        ]
 
         generated_token_ids = {
             **prefill_generated_token_ids,
             **decode_generated_token_ids,
         }
+
+        finished_request_ids = [
+            request_id
+            for request_id in (
+                prefetched_request_ids
+                + decoded_request_ids
+            )
+            if request_id in self.completed
+        ]
 
         return StepResult(
             prefetched_request_ids=(
@@ -272,8 +330,7 @@ class ContinuousScheduler:
                 decoded_request_ids
             ),
             finished_request_ids=(
-                prefill_finished_request_ids
-                + decode_finished_request_ids
+                finished_request_ids
             ),
             generated_token_ids=generated_token_ids,
         )

@@ -196,7 +196,7 @@ def get_cuda_memory_snapshot(
         ),
     )
 
-def split_batched_legacy_kv_cache(
+def split_legacy_kv_cache(
     past_key_values: Any,
 ) -> list[tuple[tuple[Any, Any], ...]]:
 
@@ -209,31 +209,38 @@ def split_batched_legacy_kv_cache(
 
 # legacy_cache
 # │
-# ├── layer 0
-# │   ├── key   [2, H, S, D]
-# │   └── value [2, H, S, D]
+# ├── [0]layer 0
+# │   ├── [0]key   [2, H, S, D]
+# │   └── [1]value [2, H, S, D]
 # │
-# ├── layer 1
-# │   ├── key   [2, H, S, D]
-# │   └── value [2, H, S, D]
+# ├── [1]layer 1
+# │   ├── [0]key   [2, H, S, D]
+# │   └── [1]value [2, H, S, D]
 # │
-# └── layer 2
-#     ├── key   [2, H, S, D]
-#     └── value [2, H, S, D]
+# └── [2]layer 2
+#     ├── [0]key   [2, H, S, D]
+#     └── [1]value [2, H, S, D]
 
 # The first dimension, size 2, represents two requests.
 
 # to
 
-# request_caches
+# per_request_caches
 # │
-# ├── Request A cache
-# │   ├── layer 0: (key_A_0, value_A_0)
-# │   └── layer 1: (key_A_1, value_A_1)
+# ├── [0] Request 0
+# │      │
+# │      ├── [0] Layer 0
+# │      │      ├── [0] key
+# │      │      │      shape = [1, head, sequence, dim]
+# │      │      └── [1] value
+# │      │
+# │      ├── [1] Layer 1
+# │      └── [2] Layer 2
 # │
-# └── Request B cache
-#     ├── layer 0: (key_B_0, value_B_0)  key   [1, H, S, D]
-#     └── layer 1: (key_B_1, value_B_1)  value [1, H, S, D]
+# └── [1] Request 1
+#        ├── [0] Layer 0
+#        ├── [1] Layer 1
+#        └── [2] Layer 2
     legacy_cache = _to_legacy_cache(
         past_key_values
     )
@@ -280,11 +287,11 @@ def split_batched_legacy_kv_cache(
 
             request_key = key[
                 batch_index : batch_index + 1
-            ]
+            ].clone()
 
             request_value = value[
                 batch_index : batch_index + 1
-            ]
+            ].clone()
 
             request_layers.append(
                 (request_key, request_value)
