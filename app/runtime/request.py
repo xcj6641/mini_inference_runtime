@@ -25,6 +25,22 @@ class Request:
     finish_reason: str | None = None
     error_message: str | None = None
 
+    # This table will store physical block IDs in logical sequence order.
+
+    # Example:
+
+    # request.block_table = [3, 8, 1]
+
+    # means:
+
+    # first logical block  -> physical block 3
+    # second logical block -> physical block 8
+    # third logical block  -> physical block 1
+    
+    block_table: list[int] = field(
+        default_factory=list
+    )
+
     def __post_init__(self) -> None:
         if not self.request_id:
             raise ValueError("request_id cannot be empty")

@@ -15,6 +15,7 @@ class ContinuousScheduler:
         self,
         runner,
         batch_builder,
+        block_manager,
         max_prefill_batch_size: int = 4,
         max_decode_batch_size: int = 4,
     ) -> None:
@@ -30,6 +31,8 @@ class ContinuousScheduler:
 
         self.runner = runner
         self.batch_builder = batch_builder
+        self.block_manager = block_manager
+        
         self.max_prefill_batch_size = (
             max_prefill_batch_size
         )
