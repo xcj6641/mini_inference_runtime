@@ -219,7 +219,6 @@ class KVBlockManager:
 
         return block_ids
 
-
     def ensure_batch_capacity(
         self,
         requirements: list[

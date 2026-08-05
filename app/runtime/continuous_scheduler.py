@@ -32,7 +32,7 @@ class ContinuousScheduler:
         self.runner = runner
         self.batch_builder = batch_builder
         self.block_manager = block_manager
-        
+
         self.max_prefill_batch_size = (
             max_prefill_batch_size
         )
@@ -84,28 +84,88 @@ class ContinuousScheduler:
             f"Unknown request ID: {request_id}"
         )
 
+    # Select requests whose total batch size does not exceed max_prefill_batch_size.
+    # def _select_prefill_requests(
+    #     self,
+    # ) -> list[Request]:
+    #     selected: list[Request] = []
+
+    #     while (
+    #         self.waiting
+    #         and len(selected)
+    #         < self.max_prefill_batch_size
+    #     ):
+    #         selected.append(self.waiting.popleft())
+
+    #     return selected
+
+    # Select requests whose total kv block requirements do not exceed available blocks.
     def _select_prefill_requests(
         self,
     ) -> list[Request]:
         selected: list[Request] = []
+        remaining = deque()
 
-        while (
-            self.waiting
-            and len(selected)
-            < self.max_prefill_batch_size
-        ):
-            selected.append(self.waiting.popleft())
+        available_blocks = (
+            self.block_manager.num_free_blocks
+        )
+
+        required_blocks = 0
+
+        while self.waiting:
+            request = self.waiting.popleft()
+
+            if (
+                len(selected)
+                >= self.max_prefill_batch_size
+            ):
+                remaining.append(request)
+                continue
+
+            additional_blocks = (
+                self.block_manager
+                .additional_blocks_required(
+                    request,
+                    self._prefill_token_requirement(
+                        request
+                    ),
+                )
+            )
+
+            if (
+                required_blocks
+                + additional_blocks
+                > available_blocks
+            ):
+                remaining.append(request)
+                continue
+
+            selected.append(request)
+
+            required_blocks += (
+                additional_blocks
+            )
+
+        self.waiting = remaining
 
         return selected
+
+
+    def _prefill_token_requirement(
+        self,
+        request: Request,
+    ) -> int:
+        return len(request.input_ids)
+
     
     def _run_prefill(
         self,
+        requests: list[Request],
     ) -> tuple[list[str], dict[str, int]]:
-        requests = self._select_prefill_requests()
 
         if not requests:
             return [], {}
-
+        
         batch = self.batch_builder.build_prefill_batch(
             requests,
             pad_token_id=self.runner.pad_token_id,
@@ -175,10 +235,76 @@ class ContinuousScheduler:
             generated_token_ids,
         )
 
+    # def _decode_token_requirement(
+    #     self,
+    #     request: Request,
+    # ) -> int:
+    #     return (
+    #         len(request.input_ids)
+    #         + len(request.generated_ids)
+    #         + 1
+    #     )
+
+    def _decode_token_requirement(
+        self,
+        request: Request,
+    ) -> int:
+        if request.past_key_values is None:
+            raise ValueError(
+                "Decode request must have KV cache"
+            )
+
+        current_kv_length = (
+            get_kv_sequence_length(
+                request.past_key_values
+            )
+        )
+
+        return current_kv_length + 1
+
+    # def _select_decode_requests(
+    #     self,
+    # ) -> list[Request]:
+    #     selected: list[Request] = []
+    #     target_kv_length: int | None = None
+
+    #     for request in self.active.values():
+    #         if request.state != RequestState.DECODING:
+    #             continue
+
+    #         if request.past_key_values is None:
+    #             raise RuntimeError(
+    #                 f"Request {request.request_id} "
+    #                 "has no KV cache"
+    #             )
+
+    #         kv_length = get_kv_sequence_length(
+    #             request.past_key_values
+    #         )
+
+    #         if target_kv_length is None:
+    #             target_kv_length = kv_length
+
+    #         if kv_length != target_kv_length:
+    #             continue
+
+    #         selected.append(request)
+
+    #         if len(selected) >= self.max_decode_batch_size:
+    #             break
+
+    #     return selected
+
     def _select_decode_requests(
         self,
     ) -> list[Request]:
         selected: list[Request] = []
+
+        available_blocks = (
+            self.block_manager.num_free_blocks
+        )
+
+        required_blocks = 0
         target_kv_length: int | None = None
 
         for request in self.active.values():
@@ -191,20 +317,51 @@ class ContinuousScheduler:
                     "has no KV cache"
                 )
 
+            if (
+                len(selected)
+                >= self.max_decode_batch_size
+            ):
+                break
+
             kv_length = get_kv_sequence_length(
                 request.past_key_values
             )
 
-            if target_kv_length is None:
-                target_kv_length = kv_length
+            if (
+                target_kv_length is not None
+                and kv_length != target_kv_length
+            ):
+                continue
 
-            if kv_length != target_kv_length:
+            token_requirement = (
+                self._decode_token_requirement(
+                    request
+                )
+            )
+
+            additional_blocks = (
+                self.block_manager
+                .additional_blocks_required(
+                    request,
+                    token_requirement,
+                )
+            )
+
+            if (
+                required_blocks
+                + additional_blocks
+                > available_blocks
+            ):
                 continue
 
             selected.append(request)
 
-            if len(selected) >= self.max_decode_batch_size:
-                break
+            required_blocks += (
+                additional_blocks
+            )
+
+            if target_kv_length is None:
+                target_kv_length = kv_length
 
         return selected
 
@@ -289,6 +446,8 @@ class ContinuousScheduler:
             None,
         )
 
+        self.block_manager.free(request)
+
         request.release_kv_cache()
 
         self.completed[request.request_id] = request
@@ -296,14 +455,52 @@ class ContinuousScheduler:
     def step(self) -> StepResult:
         self.tick_id += 1
 
+        # PHASE 1 - Planning
+        # select decode batch
         decode_requests = (
             self._select_decode_requests()
         )
 
+        # reserve decode growth
+        decode_requirements = [
+            (
+                request,
+                self._decode_token_requirement(
+                    request
+                ),
+            )
+            for request in decode_requests
+        ]
+
+        # reserve blocks for decode requests before prefill to avoid deadlock
+        self.block_manager.ensure_batch_capacity(
+            decode_requirements
+        )
+
+        # select prefill batch
+        prefill_requests = self._select_prefill_requests()
+
+        # reserve prefill capacity
+        prefill_requirements = [
+            (
+                request,
+                self._prefill_token_requirement(
+                    request
+                ),
+            )
+            for request in prefill_requests
+        ]
+
+        self.block_manager.ensure_batch_capacity(
+            prefill_requirements
+        )
+
+        # PHASE 2 - Execution
+
         (
             prefetched_request_ids,
             prefill_generated_token_ids,
-        ) = self._run_prefill()
+        ) = self._run_prefill(prefill_requests)
 
         (
             decoded_request_ids,
@@ -375,4 +572,3 @@ class ContinuousScheduler:
         ):
             request.state = RequestState.FINISHED
             request.finish_reason = "length"
-
