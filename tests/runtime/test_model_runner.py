@@ -5,7 +5,7 @@ import time
 
 from app.runtime.pytorch_model_runner import PyTorchModelRunner
 from app.runtime.generation import generate
-from app.runtime.kv_cache_utils import get_cache_length
+from app.runtime.kv_cache_utils import get_kv_sequence_length
 
 def synchronize(device: torch.device) -> None:
     if device.type == "cuda":
@@ -52,7 +52,7 @@ def test_decode_adds_one_token(real_runner) -> None:
     synchronize(real_runner.device)
     prefill_ms = (time.perf_counter() - start) * 1000
 
-    prefill_cache_length = get_cache_length(
+    prefill_cache_length = get_kv_sequence_length(
         prefill_output.past_key_values
     )
 
@@ -67,7 +67,7 @@ def test_decode_adds_one_token(real_runner) -> None:
         past_key_values=prefill_output.past_key_values,
     )
 
-    decode_cache_length = get_cache_length(
+    decode_cache_length = get_kv_sequence_length(
         decode_output.past_key_values
     )
 
@@ -142,7 +142,7 @@ def test_cache_grows_across_multiple_decode_steps(
     cache = output.past_key_values
     current_token_id = output.next_token_id
 
-    initial_cache_length = get_cache_length(cache)
+    initial_cache_length = get_kv_sequence_length(cache)
 
     for step in range(3):
         decode_input_ids = torch.tensor(
@@ -159,4 +159,4 @@ def test_cache_grows_across_multiple_decode_steps(
         cache = output.past_key_values
         current_token_id = output.next_token_id
 
-        assert get_cache_length(cache) == initial_cache_length + step + 1
+        assert get_kv_sequence_length(cache) == initial_cache_length + step + 1

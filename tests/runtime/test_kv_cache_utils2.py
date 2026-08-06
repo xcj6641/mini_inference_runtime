@@ -1,7 +1,7 @@
 import torch
 
 from app.runtime.kv_cache_utils import (
-    split_batched_legacy_kv_cache,
+    split_legacy_kv_cache,
     stack_legacy_kv_caches,
 )
 
@@ -69,7 +69,7 @@ def test_split_and_stack_single_layer_round_trip() -> None:
     )
 
     per_request_caches = (
-        split_batched_legacy_kv_cache(
+        split_legacy_kv_cache(
             past_key_values
         )
     )
@@ -98,7 +98,7 @@ def test_split_and_stack_multi_layer_round_trip() -> None:
     )
 
     per_request_caches = (
-        split_batched_legacy_kv_cache(
+        split_legacy_kv_cache(
             past_key_values
         )
     )
@@ -130,7 +130,7 @@ def test_split_preserves_batch_dimension() -> None:
     )
 
     per_request_caches = (
-        split_batched_legacy_kv_cache(
+        split_legacy_kv_cache(
             past_key_values
         )
     )
@@ -172,7 +172,7 @@ def test_split_preserves_correct_batch_rows() -> None:
     )
 
     per_request_caches = (
-        split_batched_legacy_kv_cache(
+        split_legacy_kv_cache(
             past_key_values
         )
     )
@@ -222,7 +222,7 @@ def test_split_caches_do_not_alias_original_cache() -> None:
     )
 
     per_request_caches = (
-        split_batched_legacy_kv_cache(
+        split_legacy_kv_cache(
             past_key_values
         )
     )
@@ -256,7 +256,7 @@ def test_stack_combines_request_caches_on_batch_dimension() -> None:
     )
 
     per_request_caches = (
-        split_batched_legacy_kv_cache(
+        split_legacy_kv_cache(
             original
         )
     )

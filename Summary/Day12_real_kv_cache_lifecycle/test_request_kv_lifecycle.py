@@ -24,6 +24,7 @@ def test_request_initial_state() -> None:
     assert request.prompt_tokens == 3
     assert request.generated_ids == []
     assert request.generated_tokens_count == 0
+    assert request.kv_tokens == 0
     assert request.total_sequence_length == 3
 
     assert request.state == RequestState.WAITING

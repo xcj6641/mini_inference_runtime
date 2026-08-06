@@ -1027,3 +1027,233 @@ def test_decode_runs_requests_that_fit_and_skips_blocked_ones(
     )
 
     assert runner.decode_batch_call_count == 1
+
+    # the next step is the lifecycle test set we postponed. I'd do these four next:
+
+    # finished request frees all KV blocks;
+    # finished request clears past_key_values and resets kv_tokens;
+    # a waiting request can reuse blocks freed by a finished request on the next tick;
+    # finishing one request does not free another active request's blocks.
+
+def test_finished_request_frees_all_blocks() -> None:
+    block_manager = KVBlockManager(
+        num_blocks=4,
+        block_size=4,
+    )
+
+    runner = FakeRunner()
+
+    scheduler = make_scheduler(
+        runner=runner,
+        block_manager=block_manager,
+    )
+
+    request = Request(
+        request_id="request-a",
+        input_ids=[1, 2, 3, 4],
+        max_new_tokens=1,
+    )
+
+    scheduler.add_request(request)
+
+    scheduler.step()
+
+    assert request.state == RequestState.FINISHED
+
+    assert request.block_table == []
+
+    assert block_manager.num_allocated_blocks == 0
+    assert block_manager.num_free_blocks == 4
+
+    assert (
+        request.request_id
+        in scheduler.completed
+    )
+
+def test_finished_request_releases_kv_state() -> None:
+    block_manager = KVBlockManager(
+        num_blocks=4,
+        block_size=4,
+    )
+
+    runner = FakeRunner()
+
+    scheduler = make_scheduler(
+        runner=runner,
+        block_manager=block_manager,
+    )
+
+    request = Request(
+        request_id="request-a",
+        input_ids=[1, 2, 3],
+        max_new_tokens=1,
+    )
+
+    scheduler.add_request(request)
+
+    scheduler.step()
+
+    assert request.state == RequestState.FINISHED
+
+    assert request.past_key_values is None
+    assert request.kv_tokens == 0
+
+    assert request.block_table == []
+
+def test_waiting_request_reuses_block_freed_by_finished_request(
+) -> None:
+    block_manager = KVBlockManager(
+        num_blocks=1,
+        block_size=4,
+    )
+
+    runner = FakeRunner()
+
+    scheduler = make_scheduler(
+        runner=runner,
+        block_manager=block_manager,
+        max_prefill_batch_size=1,
+    )
+
+    request_a = Request(
+        request_id="request-a",
+        input_ids=[1, 2, 3],
+        max_new_tokens=1,
+    )
+
+    request_b = Request(
+        request_id="request-b",
+        input_ids=[4, 5, 6],
+        max_new_tokens=1,
+    )
+
+    scheduler.add_request(request_a)
+    scheduler.add_request(request_b)
+
+    # Tick 1:
+    # A is admitted.
+    # B stays waiting because max_prefill_batch_size = 1.
+    #
+    # A finishes immediately and frees block 0.
+    scheduler.step()
+
+    assert request_a.state == RequestState.FINISHED
+    assert request_a.block_table == []
+
+    assert request_b.state == RequestState.WAITING
+
+    assert block_manager.num_free_blocks == 1
+    assert block_manager.num_allocated_blocks == 0
+
+    # Tick 2:
+    # B should now be able to use the freed block.
+    scheduler.step()
+
+    assert request_b.state == RequestState.FINISHED
+    assert request_b.block_table == []
+
+    assert (
+        request_b.request_id
+        in scheduler.completed
+    )
+
+    assert block_manager.num_free_blocks == 1
+
+def test_waiting_request_reuses_specific_freed_block(
+) -> None:
+    block_manager = KVBlockManager(
+        num_blocks=1,
+        block_size=4,
+    )
+
+    runner = FakeRunner()
+
+    scheduler = make_scheduler(
+        runner=runner,
+        block_manager=block_manager,
+        max_prefill_batch_size=1,
+    )
+
+    request_a = Request(
+        request_id="request-a",
+        input_ids=[1, 2, 3],
+        max_new_tokens=1,
+    )
+
+    request_b = Request(
+        request_id="request-b",
+        input_ids=[4, 5, 6],
+        max_new_tokens=8,
+    )
+
+    scheduler.add_request(request_a)
+    scheduler.add_request(request_b)
+
+    scheduler.step()
+
+    assert request_a.state == RequestState.FINISHED
+    assert request_b.state == RequestState.WAITING
+
+    assert block_manager.num_free_blocks == 1
+
+    scheduler.step()
+
+    assert request_b.state == RequestState.DECODING
+
+    assert request_b.block_table == [0]
+
+    assert block_manager.owner_of(0) == "request-b"
+    assert block_manager.num_free_blocks == 0
+
+def test_finishing_one_request_does_not_free_other_request_blocks(
+) -> None:
+    block_manager = KVBlockManager(
+        num_blocks=4,
+        block_size=4,
+    )
+
+    runner = FakeRunner()
+
+    scheduler = make_scheduler(
+        runner=runner,
+        block_manager=block_manager,
+        max_prefill_batch_size=2,
+    )
+
+    request_a = Request(
+        request_id="request-a",
+        input_ids=[1, 2, 3],
+        max_new_tokens=1,
+    )
+
+    request_b = Request(
+        request_id="request-b",
+        input_ids=[4, 5, 6],
+        max_new_tokens=8,
+    )
+
+    scheduler.add_request(request_a)
+    scheduler.add_request(request_b)
+
+    scheduler.step()
+
+    # A finishes during prefill.
+    assert request_a.state == RequestState.FINISHED
+    assert request_a.block_table == []
+
+    # B remains active.
+    assert request_b.state == RequestState.DECODING
+
+    assert len(request_b.block_table) == 1
+
+    b_block_id = request_b.block_table[0]
+
+    assert (
+        block_manager.owner_of(
+            b_block_id
+        )
+        == request_b.request_id
+    )
+
+    assert block_manager.num_allocated_blocks == 1
+    assert block_manager.num_free_blocks == 3

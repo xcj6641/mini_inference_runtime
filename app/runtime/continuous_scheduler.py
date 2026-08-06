@@ -203,6 +203,7 @@ class ContinuousScheduler:
             request.attach_kv_cache(
                 per_request_caches[index]
             )
+            request.set_kv_tokens_from_prompt()
 
             request.append_generated_token(
                 next_token_id
@@ -254,13 +255,9 @@ class ContinuousScheduler:
                 "Decode request must have KV cache"
             )
 
-        current_kv_length = (
-            get_kv_sequence_length(
-                request.past_key_values
-            )
-        )
-
-        return current_kv_length + 1
+        # your scheduler can now use: request.kv_tokens + 1 for block planning, 
+        # while still using physical past_key_values length only to decide whether requests can be stacked into the same decode batch.
+        return request.kv_tokens + 1
 
     # def _select_decode_requests(
     #     self,
@@ -411,6 +408,7 @@ class ContinuousScheduler:
             request.attach_kv_cache(
                 per_request_caches[index]
             )
+            request.increment_kv_tokens()
 
             request.append_generated_token(
                 token_id=next_token_id  

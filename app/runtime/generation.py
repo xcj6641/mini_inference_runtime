@@ -7,6 +7,7 @@ import torch
 from app.runtime.pytorch_model_runner import PyTorchModelRunner
 from app.runtime.request import Request
 from app.runtime.types import GenerationResult, RequestState
+from app.runtime.kv_cache_utils import get_kv_sequence_length
 
 
 logger = logging.getLogger(__name__)
@@ -79,6 +80,7 @@ def generate_request(
         request.attach_kv_cache(
             prefill_output.past_key_values
         )
+        request.set_kv_tokens_from_prompt()
 
         request.state = RequestState.DECODING
         current_token_id = prefill_output.next_token_id
@@ -178,6 +180,7 @@ def generate_request(
             request.attach_kv_cache(
                 decode_output.past_key_values
             )
+            request.increment_kv_tokens()
 
             current_token_id = decode_output.next_token_id
 

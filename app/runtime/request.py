@@ -18,8 +18,9 @@ class Request:
     generated_ids: list[int] = field(default_factory=list)
     past_key_values: Any | None = None
 
-    prompt_tokens: int = 0 #number of tokens in the prompt
+    prompt_tokens: int = 0  # number of tokens in the prompt
     generated_tokens_count: int = 0
+    kv_tokens: int = 0
 
     state: RequestState = RequestState.WAITING
     finish_reason: str | None = None
@@ -89,6 +90,16 @@ class Request:
 
     def release_kv_cache(self) -> None:
         self.past_key_values = None
+        self.kv_tokens = 0
+
+    def set_kv_tokens_from_prompt(self) -> None:
+        self.kv_tokens = len(self.input_ids)
+
+    def increment_kv_tokens(self, amount: int = 1) -> None:
+        if amount < 0:
+            raise ValueError("amount must be non-negative")
+
+        self.kv_tokens += amount
 
     def mark_finished(
         self,

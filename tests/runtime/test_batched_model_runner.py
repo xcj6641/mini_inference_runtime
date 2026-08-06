@@ -10,7 +10,7 @@ from test_batch_builder import make_request
 
 from app.runtime.kv_cache_utils import (
     get_kv_sequence_length,
-    split_batched_legacy_kv_cache,
+    split_legacy_kv_cache,
     stack_legacy_kv_caches,
 )
 
@@ -80,7 +80,7 @@ def test_equal_length_batched_prefill_matches_single_prefill(
     assert batched_output.past_key_values is not None
     assert torch.isfinite(batched_output.logits).all()
 
-    request_caches = split_batched_legacy_kv_cache(
+    request_caches = split_legacy_kv_cache(
         batched_output.past_key_values
     )
 
@@ -144,7 +144,7 @@ def test_split_batched_legacy_kv_cache() -> None:
     )
 
     request_caches = (
-        split_batched_legacy_kv_cache(
+        split_legacy_kv_cache(
             batched_cache
         )
     )
@@ -259,7 +259,7 @@ def test_variable_length_batched_prefill_kv_length(
 
     output = real_runner.prefill_batch(batch)
 
-    request_caches = split_batched_legacy_kv_cache(
+    request_caches = split_legacy_kv_cache(
         output.past_key_values
     )
 
@@ -330,7 +330,7 @@ def test_stack_and_split_cache_round_trip() -> None:
     assert batched_value.shape[0] == 2
 
     split_caches = (
-        split_batched_legacy_kv_cache(
+        split_legacy_kv_cache(
             batched_cache
         )
     )
@@ -413,7 +413,7 @@ def test_equal_length_batched_decode_matches_single_prefill(
     first_token_a = batched_prefill_output.next_token_ids[0]
     first_token_b = batched_prefill_output.next_token_ids[1]
     # past_key_values should be splited from batched_prefill_output.past_key_values
-    request_past_key_values = split_batched_legacy_kv_cache(
+    request_past_key_values = split_legacy_kv_cache(
         batched_prefill_output.past_key_values
     )
     # get mask

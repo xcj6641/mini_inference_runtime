@@ -1,21 +1,22 @@
 import pytest
+import torch
 
-from dataclasses import dataclass
 from app.runtime.continuous_scheduler import (
     ContinuousScheduler,
 )
-from app.runtime.request import Request, RequestState
+from app.runtime.kv_cache_utils import (
+    get_kv_sequence_length,
+)
+from app.runtime.request import (
+    Request,
+    RequestState,
+)
+from app.runtime.types import (
+    BatchedDecodeOutput,
+    BatchedPrefillOutput,
+)
 
-@dataclass
-class FakePrefillOutput:
-    next_token_ids: list[int]
-    past_key_values: list[object]
 
-@dataclass
-class FakeDecodeOutput:
-    next_token_ids: list[int]
-    past_key_values: list[object]
-    
 class FakeRunner:
     def __init__(self) -> None:
         self.prefill_calls: list[list[str]] = []
@@ -24,10 +25,67 @@ class FakeRunner:
         self.eos_token_ids: set[int] = {9999}
         self.eos_on_decode_for: set[str] = set()
 
+        self.pad_token_id: int = 0
+        self.device = torch.device("cpu")
+
+        self.num_layers = 1
+        self.num_kv_heads = 1
+        self.head_dim = 1
+        self.vocab_size = 10000
+
+    def _make_batched_kv_cache(
+        self,
+        *,
+        batch_size: int,
+        sequence_length: int,
+    ):
+        layers = []
+
+        for _ in range(self.num_layers):
+            shape = (
+                batch_size,
+                self.num_kv_heads,
+                sequence_length,
+                self.head_dim,
+            )
+
+            key = torch.zeros(
+                shape,
+                dtype=torch.float32,
+            )
+            value = torch.zeros(
+                shape,
+                dtype=torch.float32,
+            )
+
+            layers.append(
+                (
+                    key,
+                    value,
+                )
+            )
+
+        return tuple(layers)
+
+    def _make_logits(
+        self,
+        *,
+        batch_size: int,
+        sequence_length: int,
+    ) -> torch.Tensor:
+        return torch.zeros(
+            (
+                batch_size,
+                sequence_length,
+                self.vocab_size,
+            ),
+            dtype=torch.float32,
+        )
+
     def prefill_batch(
         self,
         requests: list[Request],
-    ) -> FakePrefillOutput:
+    ) -> BatchedPrefillOutput:
         self.prefill_calls.append(
             [
                 request.request_id
@@ -35,28 +93,38 @@ class FakeRunner:
             ]
         )
 
+        batch_size = len(requests)
+
+        # Mimic padded batched prefill:
+        # physical KV length equals the longest prompt
+        # in the batch, while each Request.kv_tokens
+        # still tracks its own logical prompt length.
+        physical_kv_length = max(
+            len(request.input_ids)
+            for request in requests
+        )
+
         next_token_ids = [
             1000 + index
-            for index in range(len(requests))
+            for index in range(batch_size)
         ]
 
-        past_key_values = [
-            {
-                "request_id": request.request_id,
-                "kv_length": len(request.input_ids),
-            }
-            for request in requests
-        ]
-
-        return FakePrefillOutput(
+        return BatchedPrefillOutput(
             next_token_ids=next_token_ids,
-            past_key_values=past_key_values,
+            past_key_values=self._make_batched_kv_cache(
+                batch_size=batch_size,
+                sequence_length=physical_kv_length,
+            ),
+            logits=self._make_logits(
+                batch_size=batch_size,
+                sequence_length=physical_kv_length,
+            ),
         )
 
     def decode_batch(
         self,
         requests: list[Request],
-    ) -> FakeDecodeOutput:
+    ) -> BatchedDecodeOutput:
         self.decode_calls.append(
             [
                 request.request_id
@@ -64,8 +132,15 @@ class FakeRunner:
             ]
         )
 
+        batch_size = len(requests)
+
+        old_physical_kv_length = (
+            get_kv_sequence_length(
+                requests[0].past_key_values
+            )
+        )
+
         next_token_ids: list[int] = []
-        past_key_values: list[object] = []
 
         for request in requests:
             if (
@@ -81,26 +156,22 @@ class FakeRunner:
 
             next_token_ids.append(next_token_id)
 
-            previous_cache = request.past_key_values
-
-            past_key_values.append(
-                {
-                    "request_id": request.request_id,
-                    "kv_length": (
-                        previous_cache["kv_length"]
-                        + 1
-                    ),
-                }
-            )
-
-        return FakeDecodeOutput(
+        return BatchedDecodeOutput(
             next_token_ids=next_token_ids,
-            past_key_values=past_key_values,
+            past_key_values=self._make_batched_kv_cache(
+                batch_size=batch_size,
+                sequence_length=(
+                    old_physical_kv_length + 1
+                ),
+            ),
+            logits=self._make_logits(
+                batch_size=batch_size,
+                sequence_length=1,
+            ),
         )
-    
+
 
 class FakeBatchBuilder:
-        
     def __init__(self) -> None:
         self.prefill_calls: list[list[str]] = []
         self.decode_calls: list[list[str]] = []
@@ -108,6 +179,8 @@ class FakeBatchBuilder:
     def build_prefill_batch(
         self,
         requests: list[Request],
+        pad_token_id: int | None,
+        device: torch.device | None,
     ) -> list[Request]:
         self.prefill_calls.append(
             [
@@ -118,9 +191,10 @@ class FakeBatchBuilder:
 
         return requests
 
-    def build_decode_batch(
+    def build_equal_length_decode_batch(
         self,
         requests: list[Request],
+        device: torch.device | None,
     ) -> list[Request]:
         self.decode_calls.append(
             [
@@ -130,6 +204,7 @@ class FakeBatchBuilder:
         )
 
         return requests
+
 
 @pytest.fixture
 def fake_runner() -> FakeRunner:
@@ -145,29 +220,31 @@ def fake_batch_builder() -> FakeBatchBuilder:
 def scheduler(
     fake_runner,
     fake_batch_builder,
+    block_manager,
 ) -> ContinuousScheduler:
     return ContinuousScheduler(
         runner=fake_runner,
         batch_builder=fake_batch_builder,
+        block_manager=block_manager,
         max_prefill_batch_size=2,
+        max_decode_batch_size=2,
     )
+
 
 def make_request(
     request_id: str,
     max_new_tokens: int = 4,
+    input_ids: list[int] | None = None,
 ) -> Request:
+    if input_ids is None:
+        input_ids = [1, 2, 3]
+
     return Request(
         request_id=request_id,
-        input_ids=[1, 2, 3],
-        generated_ids=[],
-        past_key_values=None,
-        prompt_tokens=3,
-        generated_tokens_count=0,
-        state=RequestState.WAITING,
-        finish_reason=None,
-        error_message=None,
+        input_ids=list(input_ids),
         max_new_tokens=max_new_tokens,
     )
+
 
 def test_step_prefills_waiting_request(
     scheduler,
@@ -190,13 +267,14 @@ def test_step_prefills_waiting_request(
     assert len(scheduler.waiting) == 0
     assert "request-a" in scheduler.active
 
-    assert (
-        request.state
-        == RequestState.DECODING
-    )
+    assert request.state == RequestState.DECODING
     assert request.generated_ids == [1000]
     assert request.generated_tokens_count == 1
+
     assert request.past_key_values is not None
+    assert request.kv_tokens == 3
+    assert len(request.block_table) == 1
+
 
 def test_prefill_respects_batch_size_limit(
     scheduler,
@@ -238,6 +316,7 @@ def test_prefill_respects_batch_size_limit(
         "request-c",
     }
 
+
 def test_prefill_builds_one_batch(
     scheduler,
     fake_runner,
@@ -260,10 +339,14 @@ def test_prefill_builds_one_batch(
         ["request-a", "request-b"]
     ]
 
+
 def test_request_can_finish_during_prefill(
     scheduler,
 ) -> None:
-    request = make_request("request-a", max_new_tokens=1)
+    request = make_request(
+        "request-a",
+        max_new_tokens=1,
+    )
 
     scheduler.add_request(request)
 
@@ -283,7 +366,11 @@ def test_request_can_finish_during_prefill(
 
     assert "request-a" not in scheduler.active
     assert "request-a" in scheduler.completed
+
     assert request.past_key_values is None
+    assert request.kv_tokens == 0
+    assert request.block_table == []
+
 
 def test_active_request_is_decoded_on_next_step(
     scheduler,
@@ -303,6 +390,7 @@ def test_active_request_is_decoded_on_next_step(
     ]
     assert first_result.decoded_request_ids == []
     assert request.generated_ids == [1000]
+    assert request.kv_tokens == 3
 
     second_result = scheduler.step()
 
@@ -319,6 +407,7 @@ def test_active_request_is_decoded_on_next_step(
         2001,
     ]
     assert request.generated_tokens_count == 2
+    assert request.kv_tokens == 4
     assert request.state == RequestState.DECODING
 
     assert fake_batch_builder.decode_calls == [
@@ -327,6 +416,7 @@ def test_active_request_is_decoded_on_next_step(
     assert fake_runner.decode_calls == [
         ["request-a"]
     ]
+
 
 def test_request_finishes_during_decode(
     scheduler,
@@ -364,8 +454,12 @@ def test_request_finishes_during_decode(
 
     assert "request-a" not in scheduler.active
     assert "request-a" in scheduler.completed
+
     assert request.past_key_values is None
+    assert request.kv_tokens == 0
+    assert request.block_table == []
     assert not scheduler.has_pending_work()
+
 
 def test_new_request_joins_while_existing_request_decodes(
     scheduler,
@@ -409,17 +503,16 @@ def test_new_request_joins_while_existing_request_decodes(
 
     assert tick_3.prefetched_request_ids == []
     assert tick_3.decoded_request_ids == [
-        "request-a",
-        "request-b",
+        "request-a"
     ]
 
     assert fake_runner.decode_calls == [
         ["request-a"],
-        ["request-a", "request-b"],
+        ["request-a"],
     ]
 
+
 def test_short_request_finishes_while_long_request_continues(
-    
     scheduler,
 ) -> None:
     request_a = make_request(
@@ -451,11 +544,16 @@ def test_short_request_finishes_while_long_request_continues(
     assert "request-a" not in scheduler.active
     assert "request-b" in scheduler.active
 
+    assert request_a.block_table == []
+    assert request_a.kv_tokens == 0
+    assert request_b.block_table != []
+
     third_result = scheduler.step()
 
     assert third_result.decoded_request_ids == [
         "request-b"
     ]
+
 
 def test_eos_finishes_and_cleans_up_request(
     scheduler,
@@ -506,7 +604,10 @@ def test_eos_finishes_and_cleans_up_request(
     assert "request-a" in scheduler.completed
 
     assert request.past_key_values is None
+    assert request.kv_tokens == 0
+    assert request.block_table == []
     assert not scheduler.has_pending_work()
+
 
 def test_eos_takes_precedence_over_length(
     scheduler,
@@ -531,6 +632,7 @@ def test_eos_takes_precedence_over_length(
     assert request.generated_tokens_count == 2
     assert request.state == RequestState.FINISHED
     assert request.finish_reason == "eos"
+
 
 def test_one_request_hits_eos_while_other_continues(
     scheduler,
@@ -572,9 +674,13 @@ def test_one_request_hits_eos_while_other_continues(
     assert request_a.state == RequestState.FINISHED
     assert request_a.finish_reason == "eos"
     assert request_a.past_key_values is None
+    assert request_a.kv_tokens == 0
+    assert request_a.block_table == []
 
     assert request_b.state == RequestState.DECODING
     assert request_b.past_key_values is not None
+    assert request_b.kv_tokens > 0
+    assert request_b.block_table != []
 
     assert set(scheduler.active) == {
         "request-b"

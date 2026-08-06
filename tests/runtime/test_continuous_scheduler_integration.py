@@ -4,6 +4,7 @@ from app.runtime.batch_builder import BatchBuilder
 from app.runtime.continuous_scheduler import (
     ContinuousScheduler,
 )
+from app.runtime.kv_block_manager import KVBlockManager
 from app.runtime.kv_cache_utils import (
     get_kv_sequence_length,
 )
@@ -20,11 +21,17 @@ from app.runtime.request import (
 def test_scheduler_decode_updates_real_kv_cache(
     real_runner: PyTorchModelRunner,
 ) -> None:
+    block_manager = KVBlockManager(
+        num_blocks=2,
+        block_size=4,
+    )
+
     scheduler = ContinuousScheduler(
         runner=real_runner,
         batch_builder=BatchBuilder(),
         max_prefill_batch_size=1,
         max_decode_batch_size=1,
+        block_manager=block_manager,
     )
 
     input_ids = (
@@ -109,11 +116,16 @@ def test_scheduler_decode_updates_real_kv_cache(
 def test_scheduler_real_batched_decode_two_requests(
     real_runner: PyTorchModelRunner,
 ) -> None:
+    block_manager = KVBlockManager(
+            num_blocks=8,
+            block_size=4,
+        )
     scheduler = ContinuousScheduler(
         runner=real_runner,
         batch_builder=BatchBuilder(),
         max_prefill_batch_size=2,
         max_decode_batch_size=2,
+        block_manager=block_manager,
     )
 
     input_ids_a = (
@@ -243,11 +255,17 @@ def test_scheduler_real_batched_decode_two_requests(
 def test_scheduler_real_request_finishes_by_length(
     real_runner: PyTorchModelRunner,
 ) -> None:
+    block_manager = KVBlockManager(
+        num_blocks=2,
+        block_size=4,
+    )
+
     scheduler = ContinuousScheduler(
         runner=real_runner,
         batch_builder=BatchBuilder(),
         max_prefill_batch_size=1,
         max_decode_batch_size=1,
+        block_manager=block_manager,
     )
 
     input_ids = (
@@ -298,11 +316,16 @@ def test_scheduler_real_request_finishes_by_length(
 def test_real_batched_decode_one_finishes_other_continues(
     real_runner: PyTorchModelRunner,
 ) -> None:
+    block_manager = KVBlockManager(
+        num_blocks=8,
+        block_size=4,
+    )
     scheduler = ContinuousScheduler(
         runner=real_runner,
         batch_builder=BatchBuilder(),
         max_prefill_batch_size=2,
         max_decode_batch_size=2,
+        block_manager=block_manager,
     )
 
     input_ids_a = (
