@@ -85,6 +85,7 @@ class PagedKVCache:
         block_table: list[int],
         past_key_values,
         num_tokens: int,
+        source_start: int = 0,
     ) -> None:
         if num_tokens < 0:
             raise ValueError("num_tokens must be non-negative")
@@ -92,6 +93,10 @@ class PagedKVCache:
         if len(past_key_values) != self.num_layers:
             raise ValueError("unexpected number of KV layers")
 
+        if source_start < 0:
+            raise ValueError("source_start must be non-negative")
+    
+        
         for layer_idx, (key, value) in enumerate(past_key_values):
             if key.shape[0] != 1 or value.shape[0] != 1:
                 raise ValueError("only batch size 1 is supported")
@@ -110,7 +115,13 @@ class PagedKVCache:
 
             if value.shape[3] != self.head_dim:
                 raise ValueError("unexpected head_dim")
-
+            
+            if source_start + num_tokens > key.shape[2]:
+                raise ValueError("source_start and num_tokens exceed key shape")
+                        
+            if source_start + num_tokens > value.shape[2]:
+                raise ValueError("source_start and num_tokens exceed value shape")
+                    
             for token_idx in range(num_tokens):
                 physical_block_id, slot_idx = (
                     self.get_physical_location(
@@ -118,6 +129,8 @@ class PagedKVCache:
                         token_idx,
                     )
                 )
+
+                source_token_idx = source_start + token_idx
 
                 self.key_cache[
                     layer_idx,
@@ -128,7 +141,7 @@ class PagedKVCache:
                 ] = key[
                     0,
                     :,
-                    token_idx,
+                    source_token_idx,
                     :,
                 ]
 
@@ -141,7 +154,7 @@ class PagedKVCache:
                 ] = value[
                     0,
                     :,
-                    token_idx,
+                    source_token_idx,
                     :,
                 ]
 

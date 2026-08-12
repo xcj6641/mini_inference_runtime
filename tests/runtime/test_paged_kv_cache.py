@@ -621,3 +621,77 @@ def test_multiple_requests_are_isolated() -> None:
         restored_b_new[0][1],
         value_b_new,
     )
+
+# test with padding
+def test_write_request_kv_skips_left_padding() -> None:
+    cache = PagedKVCache(
+        num_layers=1,
+        num_blocks=4,
+        num_kv_heads=1,
+        block_size=4,
+        head_dim=2,
+        dtype=torch.float32,
+        device="cpu",
+    )
+
+    key = torch.tensor(
+        [[[
+            [-99.0, -99.0],  # PAD
+            [-99.0, -99.0],  # PAD
+            [-99.0, -99.0],  # PAD
+            [10.0, 10.1],    # real token 0
+            [11.0, 11.1],    # real token 1
+            [12.0, 12.1],    # real token 2
+        ]]]
+    )
+
+    value = torch.tensor(
+        [[[
+            [-999.0, -999.0],
+            [-999.0, -999.0],
+            [-999.0, -999.0],
+            [110.0, 110.1],
+            [111.0, 111.1],
+            [112.0, 112.1],
+        ]]]
+    )
+
+    cache.write_request_kv(
+        block_table=[2],
+        past_key_values=((key, value),),
+        num_tokens=3,
+        source_start=3,
+    )
+
+    restored = cache.materialize_request_kv(
+        block_table=[2],
+        num_tokens=3,
+    )
+
+    expected_key = torch.tensor(
+        [[[
+            [10.0, 10.1],
+            [11.0, 11.1],
+            [12.0, 12.1],
+        ]]]
+    )
+
+    expected_value = torch.tensor(
+        [[[
+            [110.0, 110.1],
+            [111.0, 111.1],
+            [112.0, 112.1],
+        ]]]
+    )
+
+    torch.testing.assert_close(
+        restored[0][0],
+        expected_key,
+    )
+
+    torch.testing.assert_close(
+        restored[0][1],
+        expected_value,
+    )
+
+    
