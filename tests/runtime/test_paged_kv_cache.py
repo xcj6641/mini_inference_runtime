@@ -1,8 +1,12 @@
 import pytest
+from app.runtime.batch_builder import BatchBuilder
+from app.runtime.continuous_scheduler import ContinuousScheduler
+from app.runtime.kv_block_manager import KVBlockManager
 import torch
 
 from app.runtime.paged_kv_cache import PagedKVCache
-
+from app.runtime.request import Request
+from tests.runtime.fake_runner import FakeRunner, FakeBatchBuilder
 
 def test_constructor_creates_expected_cache_shapes() -> None:
     cache = PagedKVCache(
@@ -694,4 +698,209 @@ def test_write_request_kv_skips_left_padding() -> None:
         expected_value,
     )
 
-    
+# test paged kv cache integration with continuous scheduler
+def make_request(
+    request_id: str,
+    max_new_tokens: int = 4,
+    input_ids: list[int] | None = None,
+) -> Request:
+    if input_ids is None:
+        input_ids = [1, 2, 3]
+
+    return Request(
+        request_id=request_id,
+        input_ids=list(input_ids),
+        max_new_tokens=max_new_tokens,
+    )
+
+@pytest.fixture
+def fake_runner() -> FakeRunner:
+    return FakeRunner( head_dim=2)
+
+def test_prefill_writes_real_kv_into_paged_cache(
+        fake_runner: FakeRunner,
+        batch_builder: FakeBatchBuilder,
+        block_manager: KVBlockManager,
+) -> None:
+    paged_kv_cache = PagedKVCache(
+        num_layers=1,
+        num_blocks=16,
+        num_kv_heads=1,
+        block_size=4,
+        head_dim=2,
+        dtype=torch.float32,
+        device="cpu",
+    )
+
+    scheduler = ContinuousScheduler(
+        runner=fake_runner,
+        batch_builder=batch_builder,
+        block_manager=block_manager,
+        paged_kv_cache=paged_kv_cache,
+        max_prefill_batch_size=4,
+        max_decode_batch_size=4,
+    )
+
+    request = make_request(
+        request_id="A",
+        input_ids=[1, 2, 3, 4],
+    )
+
+    scheduler.add_request(request)
+
+    scheduler.step()
+
+    assert request.kv_tokens == 4
+    assert len(request.block_table) == 1
+
+    materialized = (
+        paged_kv_cache.materialize_request_kv(
+            block_table=request.block_table,
+            num_tokens=request.kv_tokens,
+        )
+    )
+
+    reference = request.past_key_values
+
+    assert reference is not None
+
+    for (
+        reference_layer,
+        materialized_layer,
+    ) in zip(reference, materialized):
+        reference_key, reference_value = reference_layer
+        paged_key, paged_value = materialized_layer
+
+        torch.testing.assert_close(
+            paged_key,
+            reference_key,
+        )
+
+        torch.testing.assert_close(
+            paged_value,
+            reference_value,
+        )
+
+def test_prefill_paged_cache_excludes_left_padding(
+    fake_runner: FakeRunner,
+    batch_builder: FakeBatchBuilder,
+    block_manager: KVBlockManager,
+) -> None:
+    paged_kv_cache = PagedKVCache(
+        num_layers=1,
+        num_blocks=16,
+        num_kv_heads=1,
+        block_size=4,
+        head_dim=2,
+        dtype=torch.float32,
+        device="cpu",
+    )
+
+    scheduler = ContinuousScheduler(
+        runner=fake_runner,
+        batch_builder=batch_builder,
+        block_manager=block_manager,
+        paged_kv_cache=paged_kv_cache,
+        max_prefill_batch_size=4,
+        max_decode_batch_size=4,
+    )
+
+    request_a = make_request(
+        request_id="A",
+        input_ids=[1, 2, 3],
+    )
+
+    request_b = make_request(
+        request_id="B",
+        input_ids=[4, 5, 6, 7, 8, 9],
+    )
+
+    scheduler.add_request(request_a)
+    scheduler.add_request(request_b)
+
+    scheduler.step()
+
+    assert request_a.kv_tokens == 3
+    assert request_b.kv_tokens == 6
+
+    paged_a = paged_kv_cache.materialize_request_kv(
+        block_table=request_a.block_table,
+        num_tokens=request_a.kv_tokens,
+    )
+
+    paged_b = paged_kv_cache.materialize_request_kv(
+        block_table=request_b.block_table,
+        num_tokens=request_b.kv_tokens,
+    )
+
+    assert paged_a[0][0].shape[2] == 3
+    assert paged_b[0][0].shape[2] == 6
+
+    reference_a = request_a.past_key_values
+    reference_b = request_b.past_key_values
+
+    assert reference_a is not None
+    assert reference_b is not None
+
+    physical_length_a = reference_a[0][0].shape[2]
+    physical_length_b = reference_b[0][0].shape[2]
+
+    assert physical_length_a == 6
+    assert physical_length_b == 6
+
+    source_start_a = (
+        physical_length_a - request_a.kv_tokens
+    )
+
+    source_start_b = (
+        physical_length_b - request_b.kv_tokens
+    )
+
+    assert source_start_a == 3
+    assert source_start_b == 0
+
+    for layer_idx in range(len(reference_a)):
+        reference_key_a, reference_value_a = (
+            reference_a[layer_idx]
+        )
+
+        expected_key_a = reference_key_a[
+            :,
+            :,
+            source_start_a:
+            source_start_a + request_a.kv_tokens,
+            :,
+        ]
+
+        expected_value_a = reference_value_a[
+            :,
+            :,
+            source_start_a:
+            source_start_a + request_a.kv_tokens,
+            :,
+        ]
+
+        torch.testing.assert_close(
+            paged_a[layer_idx][0],
+            expected_key_a,
+        )
+
+        torch.testing.assert_close(
+            paged_a[layer_idx][1],
+            expected_value_a,
+        )
+
+    for layer_idx in range(len(reference_b)):
+        reference_key_b, reference_value_b = (
+            reference_b[layer_idx]
+        )
+
+        torch.testing.assert_close(
+            paged_b[layer_idx][0],
+            reference_key_b,
+        )
+
+        torch.testing.assert_close(
+            paged_b[layer_idx][1],
+            reference_value_b,
+        )

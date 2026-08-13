@@ -8,6 +8,7 @@ from app.runtime.kv_cache_utils import (
     split_legacy_kv_cache,
     get_kv_sequence_length,
 )
+from app.runtime.paged_kv_cache import PagedKVCache
 
 
 class ContinuousScheduler:
@@ -16,6 +17,7 @@ class ContinuousScheduler:
         runner,
         batch_builder,
         block_manager,
+        paged_kv_cache: PagedKVCache,
         max_prefill_batch_size: int = 4,
         max_decode_batch_size: int = 4,
     ) -> None:
@@ -32,7 +34,7 @@ class ContinuousScheduler:
         self.runner = runner
         self.batch_builder = batch_builder
         self.block_manager = block_manager
-
+        self.paged_kv_cache = paged_kv_cache
         self.max_prefill_batch_size = (
             max_prefill_batch_size
         )
@@ -83,21 +85,6 @@ class ContinuousScheduler:
         raise KeyError(
             f"Unknown request ID: {request_id}"
         )
-
-    # Select requests whose total batch size does not exceed max_prefill_batch_size.
-    # def _select_prefill_requests(
-    #     self,
-    # ) -> list[Request]:
-    #     selected: list[Request] = []
-
-    #     while (
-    #         self.waiting
-    #         and len(selected)
-    #         < self.max_prefill_batch_size
-    #     ):
-    #         selected.append(self.waiting.popleft())
-
-    #     return selected
 
     # Select requests whose total kv block requirements do not exceed available blocks.
     def _select_prefill_requests(
@@ -150,14 +137,12 @@ class ContinuousScheduler:
 
         return selected
 
-
     def _prefill_token_requirement(
         self,
         request: Request,
     ) -> int:
         return len(request.input_ids)
 
-    
     def _run_prefill(
         self,
         requests: list[Request],
@@ -196,14 +181,26 @@ class ContinuousScheduler:
         generated_token_ids: dict[str, int] = {}
 
         for index, request in enumerate(requests):
+
+            request.set_kv_tokens_from_prompt()
             next_token_id = int(
                 output.next_token_ids[index]
             )
 
+            per_request_cache = per_request_caches[index]
+            # Temporay old path.
             request.attach_kv_cache(
-                per_request_caches[index]
+                per_request_cache
             )
-            request.set_kv_tokens_from_prompt()
+            # New paged path.
+            physical_kv_length = per_request_cache[0][0].shape[2]
+            source_start = physical_kv_length - request.kv_tokens
+            self.paged_kv_cache.write_request_kv(
+                block_table=request.block_table,
+                past_key_values=per_request_cache,
+                num_tokens=request.kv_tokens,
+                source_start=source_start,
+            )
 
             request.append_generated_token(
                 next_token_id
@@ -236,16 +233,6 @@ class ContinuousScheduler:
             generated_token_ids,
         )
 
-    # def _decode_token_requirement(
-    #     self,
-    #     request: Request,
-    # ) -> int:
-    #     return (
-    #         len(request.input_ids)
-    #         + len(request.generated_ids)
-    #         + 1
-    #     )
-
     def _decode_token_requirement(
         self,
         request: Request,
@@ -258,39 +245,6 @@ class ContinuousScheduler:
         # your scheduler can now use: request.kv_tokens + 1 for block planning, 
         # while still using physical past_key_values length only to decide whether requests can be stacked into the same decode batch.
         return request.kv_tokens + 1
-
-    # def _select_decode_requests(
-    #     self,
-    # ) -> list[Request]:
-    #     selected: list[Request] = []
-    #     target_kv_length: int | None = None
-
-    #     for request in self.active.values():
-    #         if request.state != RequestState.DECODING:
-    #             continue
-
-    #         if request.past_key_values is None:
-    #             raise RuntimeError(
-    #                 f"Request {request.request_id} "
-    #                 "has no KV cache"
-    #             )
-
-    #         kv_length = get_kv_sequence_length(
-    #             request.past_key_values
-    #         )
-
-    #         if target_kv_length is None:
-    #             target_kv_length = kv_length
-
-    #         if kv_length != target_kv_length:
-    #             continue
-
-    #         selected.append(request)
-
-    #         if len(selected) >= self.max_decode_batch_size:
-    #             break
-
-    #     return selected
 
     def _select_decode_requests(
         self,

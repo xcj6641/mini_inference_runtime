@@ -23,6 +23,8 @@ from app.runtime.kv_cache_utils import (
     get_kv_sequence_length,
 )
 
+from app.runtime.paged_kv_cache import PagedKVCache
+
 from typing import Any, TypeAlias
 
 
@@ -500,6 +502,7 @@ def make_scheduler(
     block_manager=None,
     max_prefill_batch_size: int = 4,
     max_decode_batch_size: int = 4,
+    paged_kv_cache: PagedKVCache | None = None,
 ) -> ContinuousScheduler:
     if runner is None:
         runner = FakeRunner()
@@ -513,6 +516,17 @@ def make_scheduler(
             block_size=4,
         )
 
+    if paged_kv_cache is None:
+        paged_kv_cache = PagedKVCache(
+            num_layers=1,
+            num_blocks=32,
+            num_kv_heads=1,
+            block_size=4,
+            head_dim=2,
+            dtype=torch.float32,
+            device="cpu",
+        )
+
     return ContinuousScheduler(
         runner=runner,
         batch_builder=batch_builder,
@@ -523,6 +537,7 @@ def make_scheduler(
         max_decode_batch_size=(
             max_decode_batch_size
         ),
+        paged_kv_cache=paged_kv_cache,
     )
 
 

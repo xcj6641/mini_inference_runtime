@@ -1,4 +1,5 @@
 import pytest
+from app.runtime.paged_kv_cache import PagedKVCache
 import torch
 
 from app.runtime.continuous_scheduler import (
@@ -222,12 +223,22 @@ def scheduler(
     fake_batch_builder,
     block_manager,
 ) -> ContinuousScheduler:
+    paged_kv_cache = PagedKVCache(
+    num_layers=1,
+    num_blocks=32,
+    num_kv_heads=1,
+    block_size=4,
+    head_dim=2,
+    dtype=torch.float32,
+    device="cpu",
+)
     return ContinuousScheduler(
         runner=fake_runner,
         batch_builder=fake_batch_builder,
         block_manager=block_manager,
         max_prefill_batch_size=2,
         max_decode_batch_size=2,
+        paged_kv_cache=paged_kv_cache,
     )
 
 

@@ -1,4 +1,5 @@
 import pytest
+import torch
 
 from app.runtime.batch_builder import BatchBuilder
 from app.runtime.continuous_scheduler import (
@@ -11,6 +12,7 @@ from app.runtime.kv_cache_utils import (
 from app.runtime.pytorch_model_runner import (
     PyTorchModelRunner,
 )
+from app.runtime.paged_kv_cache import PagedKVCache
 from app.runtime.request import (
     Request,
     RequestState,
@@ -26,12 +28,23 @@ def test_scheduler_decode_updates_real_kv_cache(
         block_size=4,
     )
 
+    paged_kv_cache = PagedKVCache(
+        num_layers=1,
+        num_blocks=32,
+        num_kv_heads=1,
+        block_size=4,
+        head_dim=2,
+        dtype=torch.float32,
+        device="cpu",
+    )
+
     scheduler = ContinuousScheduler(
         runner=real_runner,
         batch_builder=BatchBuilder(),
         max_prefill_batch_size=1,
         max_decode_batch_size=1,
         block_manager=block_manager,
+        paged_kv_cache=paged_kv_cache,
     )
 
     input_ids = (
@@ -120,12 +133,23 @@ def test_scheduler_real_batched_decode_two_requests(
             num_blocks=8,
             block_size=4,
         )
+    paged_kv_cache = PagedKVCache(
+        num_layers=1,
+        num_blocks=32,
+        num_kv_heads=1,
+        block_size=4,
+        head_dim=2,
+        dtype=torch.float32,
+        device="cpu",
+    )
+
     scheduler = ContinuousScheduler(
         runner=real_runner,
         batch_builder=BatchBuilder(),
         max_prefill_batch_size=2,
         max_decode_batch_size=2,
         block_manager=block_manager,
+        paged_kv_cache=paged_kv_cache,
     )
 
     input_ids_a = (
@@ -259,6 +283,15 @@ def test_scheduler_real_request_finishes_by_length(
         num_blocks=2,
         block_size=4,
     )
+    paged_kv_cache = PagedKVCache(
+        num_layers=1,
+        num_blocks=32,
+        num_kv_heads=1,
+        block_size=4,
+        head_dim=2,
+        dtype=torch.float32,
+        device="cpu",
+    )
 
     scheduler = ContinuousScheduler(
         runner=real_runner,
@@ -266,6 +299,7 @@ def test_scheduler_real_request_finishes_by_length(
         max_prefill_batch_size=1,
         max_decode_batch_size=1,
         block_manager=block_manager,
+        paged_kv_cache=paged_kv_cache,
     )
 
     input_ids = (
@@ -320,12 +354,22 @@ def test_real_batched_decode_one_finishes_other_continues(
         num_blocks=8,
         block_size=4,
     )
+    paged_kv_cache = PagedKVCache(
+        num_layers=1,
+        num_blocks=32,
+        num_kv_heads=1,
+        block_size=4,
+        head_dim=2,
+        dtype=torch.float32,
+        device="cpu",
+    )
     scheduler = ContinuousScheduler(
         runner=real_runner,
         batch_builder=BatchBuilder(),
         max_prefill_batch_size=2,
         max_decode_batch_size=2,
         block_manager=block_manager,
+        paged_kv_cache=paged_kv_cache,
     )
 
     input_ids_a = (

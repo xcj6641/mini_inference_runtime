@@ -15,12 +15,13 @@ class DummyBatchBuilder:
 
 
 @pytest.fixture
-def scheduler(block_manager) -> ContinuousScheduler:
+def scheduler(block_manager, paged_kv_cache) -> ContinuousScheduler:
     return ContinuousScheduler(
         runner=DummyRunner(),
         batch_builder=DummyBatchBuilder(),
         max_prefill_batch_size=2,
         block_manager=block_manager,
+        paged_kv_cache=paged_kv_cache,
     )
 
 
