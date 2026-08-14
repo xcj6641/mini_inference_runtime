@@ -7,6 +7,7 @@ from app.runtime.request import Request
 from app.runtime.kv_cache_utils import (
     get_kv_sequence_length,
     stack_legacy_kv_caches,
+    left_pad_legacy_kv_cache,
 )
 
 
@@ -134,42 +135,44 @@ class BatchBuilder:
             position_ids=position_ids,
         )
     
-    def build_equal_length_decode_batch(
+    def build_decode_batch(
+    #def build_equal_length_decode_batch(
         self,
         requests: list[Request],
         *,
+        per_request_caches,
         device: torch.device | str = "cpu",
     ) -> DecodeBatch:
         if not requests:
             raise ValueError("requests cannot be empty")
 
-        for request in requests:
-            if request.past_key_values is None:
-                raise ValueError(
-                    f"Request {request.request_id} "
-                    "has no KV cache"
-                )
+        if len(requests) != len(per_request_caches):
+            raise ValueError(
+                "requests and per_request_caches "
+                "must have the same length"
+            )
 
+        for request in requests:
             if not request.generated_ids:
                 raise ValueError(
                     f"Request {request.request_id} "
                     "has no generated token for decode"
                 )
 
-        kv_lengths = {
-            get_kv_sequence_length(
-                request.past_key_values
-            )
-            for request in requests
-        }
+        kv_lengths = [
+            get_kv_sequence_length(cache)
+            for cache in per_request_caches
+        ]
 
-        if len(kv_lengths) != 1:
-            raise ValueError(
-                "All requests must have equal "
-                "physical KV sequence length"
+        max_kv_length = max(kv_lengths)
+
+        padded_request_caches = [
+            left_pad_legacy_kv_cache(
+                cache,
+                target_length=max_kv_length,
             )
-        # equal length
-        kv_length = next(iter(kv_lengths))
+            for cache in per_request_caches
+        ]
 
         input_ids = torch.tensor(
             [
@@ -180,20 +183,36 @@ class BatchBuilder:
             device=device,
         )
 
-        attention_mask = torch.ones(
+        attention_mask = torch.zeros(
             (
                 len(requests),
-                kv_length + 1,
+                max_kv_length + 1,
             ),
             dtype=torch.long,
             device=device,
         )
+        for batch_index, kv_length in enumerate(
+            kv_lengths
+        ):
+            pad_length = (
+                max_kv_length - kv_length
+            )
+
+            attention_mask[
+                batch_index,
+                pad_length:,
+            ] = 1
 
         batched_cache = stack_legacy_kv_caches(
+            padded_request_caches
+        )
+        position_ids = torch.tensor(
             [
-                request.past_key_values
-                for request in requests
-            ]
+                [kv_length]
+                for kv_length in kv_lengths
+            ],
+            dtype=torch.long,
+            device=device,
         )
 
         return DecodeBatch(
@@ -204,4 +223,6 @@ class BatchBuilder:
             input_ids=input_ids,
             past_key_values=batched_cache,
             attention_mask=attention_mask,
+            position_ids=position_ids,
         )
+

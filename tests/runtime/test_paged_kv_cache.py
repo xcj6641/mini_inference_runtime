@@ -2,11 +2,19 @@ import pytest
 from app.runtime.batch_builder import BatchBuilder
 from app.runtime.continuous_scheduler import ContinuousScheduler
 from app.runtime.kv_block_manager import KVBlockManager
+from app.runtime.pytorch_model_runner import PyTorchModelRunner
 import torch
 
 from app.runtime.paged_kv_cache import PagedKVCache
 from app.runtime.request import Request
 from tests.runtime.fake_runner import FakeRunner, FakeBatchBuilder
+from app.runtime.batch import(
+    DecodeBatch,
+    PrefillBatch,
+)
+from app.runtime.kv_cache_utils import (
+    get_kv_sequence_length,
+)
 
 def test_constructor_creates_expected_cache_shapes() -> None:
     cache = PagedKVCache(
@@ -903,4 +911,753 @@ def test_prefill_paged_cache_excludes_left_padding(
         torch.testing.assert_close(
             paged_b[layer_idx][1],
             reference_value_b,
+        )
+
+# test temperoary left-padding before decoding
+def test_build_decode_batch_left_pads_variable_length_kv() -> None:
+    batch_builder = BatchBuilder()
+
+    request_a = make_request(
+        request_id="A",
+        input_ids=[1, 2, 3],
+    )
+    request_b = make_request(
+        request_id="B",
+        input_ids=[4, 5, 6, 7, 8, 9],
+    )
+
+    # Decode needs one previously generated token.
+    request_a.generated_ids = [100]
+    request_b.generated_ids = [200]
+
+    # A has logical KV length 3.
+    key_a = torch.tensor(
+        [[[
+            [1.0, 1.1],
+            [2.0, 2.1],
+            [3.0, 3.1],
+        ]]]
+    )
+
+    value_a = torch.tensor(
+        [[[
+            [11.0, 11.1],
+            [12.0, 12.1],
+            [13.0, 13.1],
+        ]]]
+    )
+
+    # B has logical KV length 6.
+    key_b = torch.tensor(
+        [[[
+            [21.0, 21.1],
+            [22.0, 22.1],
+            [23.0, 23.1],
+            [24.0, 24.1],
+            [25.0, 25.1],
+            [26.0, 26.1],
+        ]]]
+    )
+
+    value_b = torch.tensor(
+        [[[
+            [31.0, 31.1],
+            [32.0, 32.1],
+            [33.0, 33.1],
+            [34.0, 34.1],
+            [35.0, 35.1],
+            [36.0, 36.1],
+        ]]]
+    )
+
+    per_request_caches = [
+        ((key_a, value_a),),
+        ((key_b, value_b),),
+    ]
+
+    batch = batch_builder.build_decode_batch(
+        [request_a, request_b],
+        per_request_caches=per_request_caches,
+        device="cpu",
+    )
+
+    assert batch.input_ids.shape == (2, 1)
+
+    torch.testing.assert_close(
+        batch.input_ids,
+        torch.tensor([
+            [100],
+            [200],
+        ]),
+    )
+
+    # Past KV must now be rectangular:
+    # [batch=2, heads=1, seq_len=6, head_dim=2]
+    batched_key = batch.past_key_values[0][0]
+    batched_value = batch.past_key_values[0][1]
+
+    assert batched_key.shape == (2, 1, 6, 2)
+    assert batched_value.shape == (2, 1, 6, 2)
+
+    # Request A should be left-padded by 3 positions.
+    torch.testing.assert_close(
+        batched_key[0, 0, :, :],
+        torch.tensor([
+            [0.0, 0.0],
+            [0.0, 0.0],
+            [0.0, 0.0],
+            [1.0, 1.1],
+            [2.0, 2.1],
+            [3.0, 3.1],
+        ]),
+    )
+
+    torch.testing.assert_close(
+        batched_value[0, 0, :, :],
+        torch.tensor([
+            [0.0, 0.0],
+            [0.0, 0.0],
+            [0.0, 0.0],
+            [11.0, 11.1],
+            [12.0, 12.1],
+            [13.0, 13.1],
+        ]),
+    )
+
+    # Request B should not be padded.
+    torch.testing.assert_close(
+        batched_key[1, 0, :, :],
+        key_b[0, 0],
+    )
+
+    torch.testing.assert_close(
+        batched_value[1, 0, :, :],
+        value_b[0, 0],
+    )
+
+    # Attention mask includes historical KV + current decode token.
+    #
+    # A: [PAD PAD PAD A0 A1 A2 NEW]
+    #     [ 0   0   0   1  1  1   1 ]
+    #
+    # B: [B0 B1 B2 B3 B4 B5 NEW]
+    #     [1  1  1  1  1  1   1]
+    torch.testing.assert_close(
+        batch.attention_mask,
+        torch.tensor([
+            [0, 0, 0, 1, 1, 1, 1],
+            [1, 1, 1, 1, 1, 1, 1],
+        ]),
+    )
+
+def test_build_decode_batch_does_not_modify_input_caches() -> None:
+    batch_builder = BatchBuilder()
+
+    request_a = make_request(
+        request_id="A",
+        input_ids=[1, 2, 3],
+    )
+    request_b = make_request(
+        request_id="B",
+        input_ids=[4, 5, 6, 7, 8, 9],
+    )
+
+    request_a.generated_ids = [100]
+    request_b.generated_ids = [200]
+
+    key_a = torch.randn(1, 1, 3, 2)
+    value_a = torch.randn(1, 1, 3, 2)
+
+    key_b = torch.randn(1, 1, 6, 2)
+    value_b = torch.randn(1, 1, 6, 2)
+
+    cache_a = ((key_a, value_a),)
+    cache_b = ((key_b, value_b),)
+
+    batch = batch_builder.build_decode_batch(
+        [request_a, request_b],
+        per_request_caches=[
+            cache_a,
+            cache_b,
+        ],
+        device="cpu",
+    )
+
+    # Temporary batching must not turn the persistent/materialized
+    # logical cache itself into a padded representation.
+    assert key_a.shape[2] == 3
+    assert value_a.shape[2] == 3
+
+    assert key_b.shape[2] == 6
+    assert value_b.shape[2] == 6
+
+    assert batch.position_ids is not None
+
+    torch.testing.assert_close(
+        batch.position_ids,
+        torch.tensor([
+            [3],
+            [6],
+        ]),
+    )
+
+def test_decode_writes_variable_length_kv_back_to_paged_cache(
+    fake_runner: FakeRunner,
+    batch_builder: BatchBuilder,
+    block_manager: KVBlockManager,
+) -> None:
+    paged_kv_cache = PagedKVCache(
+        num_layers=1,
+        num_blocks=16,
+        num_kv_heads=1,
+        block_size=4,
+        head_dim=2,
+        dtype=torch.float32,
+        device="cpu",
+    )
+
+    scheduler = ContinuousScheduler(
+        runner=fake_runner,
+        batch_builder=batch_builder,
+        block_manager=block_manager,
+        paged_kv_cache=paged_kv_cache,
+        max_prefill_batch_size=4,
+        max_decode_batch_size=4,
+    )
+
+    request_a = make_request(
+        request_id="A",
+        input_ids=[1, 2, 3],
+    )
+
+    request_b = make_request(
+        request_id="B",
+        input_ids=[4, 5, 6, 7, 8, 9],
+    )
+
+    scheduler.add_request(request_a)
+    scheduler.add_request(request_b)
+
+    # -------------------------
+    # Step 1: prefill
+    # -------------------------
+    scheduler.step()
+
+    assert request_a.kv_tokens == 3
+    assert request_b.kv_tokens == 6
+
+    assert len(request_a.generated_ids) == 1
+    assert len(request_b.generated_ids) == 1
+
+    paged_a_before = (
+        paged_kv_cache.materialize_request_kv(
+            block_table=request_a.block_table,
+            num_tokens=request_a.kv_tokens,
+        )
+    )
+
+    paged_b_before = (
+        paged_kv_cache.materialize_request_kv(
+            block_table=request_b.block_table,
+            num_tokens=request_b.kv_tokens,
+        )
+    )
+
+    assert paged_a_before[0][0].shape[2] == 3
+    assert paged_b_before[0][0].shape[2] == 6
+
+    # -------------------------
+    # Step 2: decode
+    # -------------------------
+    scheduler.step()
+
+    # The decode input token has now entered KV.
+    assert request_a.kv_tokens == 4
+    assert request_b.kv_tokens == 7
+
+    paged_a_after = (
+        paged_kv_cache.materialize_request_kv(
+            block_table=request_a.block_table,
+            num_tokens=request_a.kv_tokens,
+        )
+    )
+
+    paged_b_after = (
+        paged_kv_cache.materialize_request_kv(
+            block_table=request_b.block_table,
+            num_tokens=request_b.kv_tokens,
+        )
+    )
+
+    # Persistent paged KV must contain only logical tokens.
+    assert paged_a_after[0][0].shape[2] == 4
+    assert paged_a_after[0][1].shape[2] == 4
+
+    assert paged_b_after[0][0].shape[2] == 7
+    assert paged_b_after[0][1].shape[2] == 7
+
+# block-boundary decode test
+# a block-boundary decode integration test with FakeRunner;
+def test_decode_crossing_block_boundary_uses_new_block(
+    fake_runner: FakeRunner,
+    batch_builder: BatchBuilder,
+    block_manager: KVBlockManager,
+) -> None:
+    paged_kv_cache = PagedKVCache(
+        num_layers=1,
+        num_blocks=16,
+        num_kv_heads=1,
+        block_size=4,
+        head_dim=2,
+        dtype=torch.float32,
+        device="cpu",
+    )
+
+    scheduler = ContinuousScheduler(
+        runner=fake_runner,
+        batch_builder=batch_builder,
+        block_manager=block_manager,
+        paged_kv_cache=paged_kv_cache,
+        max_prefill_batch_size=4,
+        max_decode_batch_size=4,
+    )
+
+    request = make_request(
+        request_id="A",
+        input_ids=[1, 2, 3, 4],
+    )
+
+    scheduler.add_request(request)
+
+    # -------------------------
+    # Prefill
+    # -------------------------
+    scheduler.step()
+
+    assert request.kv_tokens == 4
+    assert len(request.block_table) == 1
+
+    first_block = request.block_table[0]
+
+    before_decode = (
+        paged_kv_cache.materialize_request_kv(
+            block_table=request.block_table,
+            num_tokens=request.kv_tokens,
+        )
+    )
+
+    assert before_decode[0][0].shape[2] == 4
+
+    # -------------------------
+    # Decode
+    # -------------------------
+    scheduler.step()
+
+    # Decode input token has now entered KV.
+    assert request.kv_tokens == 5
+
+    # 5 logical KV tokens with block_size=4
+    # require 2 physical blocks.
+    assert len(request.block_table) == 2
+
+    second_block = request.block_table[1]
+
+    assert second_block != first_block
+
+    after_decode = (
+        paged_kv_cache.materialize_request_kv(
+            block_table=request.block_table,
+            num_tokens=request.kv_tokens,
+        )
+    )
+
+    assert after_decode[0][0].shape[2] == 5
+    assert after_decode[0][1].shape[2] == 5
+
+    # Logical token 4 must map to:
+    # logical block = 4 // 4 = 1
+    # slot          = 4 % 4  = 0
+    #
+    # therefore request.block_table[1], slot 0.
+    physical_block, slot = (
+        paged_kv_cache.get_physical_location(
+            request.block_table,
+            4,
+        )
+    )
+
+    assert physical_block == second_block
+    assert slot == 0
+
+    # The materialized fifth token must equal the
+    # actual value stored in second_block / slot0.
+    torch.testing.assert_close(
+        paged_kv_cache.key_cache[
+            0,
+            second_block,
+            0,
+            0,
+            :,
+        ],
+        after_decode[0][0][
+            0,
+            0,
+            4,
+            :,
+        ],
+    )
+
+    torch.testing.assert_close(
+        paged_kv_cache.value_cache[
+            0,
+            second_block,
+            0,
+            0,
+            :,
+        ],
+        after_decode[0][1][
+            0,
+            0,
+            4,
+            :,
+        ],
+    )
+
+# a real-model round-trip test with PyTorchModelRunner.
+@pytest.mark.integration
+def test_real_model_prefill_round_trip_through_paged_kv(
+    real_runner: PyTorchModelRunner,
+) -> None:
+
+    input_ids = real_runner.encode_prompt(
+        "The capital of France is"
+    )
+
+    # Adapt this call to your actual runner API.
+    output = real_runner.prefill(
+        input_ids
+    )
+
+    original = output.past_key_values
+
+    assert original is not None
+
+    first_key, _ = original[0]
+
+    num_layers = len(original)
+    num_kv_heads = first_key.shape[1]
+    num_tokens = first_key.shape[2]
+    head_dim = first_key.shape[3]
+
+    block_size = 4
+
+    num_blocks_needed = (
+        num_tokens + block_size - 1
+    ) // block_size
+
+    paged_kv_cache = PagedKVCache(
+        num_layers=num_layers,
+        num_blocks=num_blocks_needed + 2,
+        num_kv_heads=num_kv_heads,
+        block_size=block_size,
+        head_dim=head_dim,
+        dtype=first_key.dtype,
+        device=first_key.device,
+    )
+
+    block_table = list(
+        range(num_blocks_needed)
+    )
+
+    paged_kv_cache.write_request_kv(
+        block_table=block_table,
+        past_key_values=original,
+        num_tokens=num_tokens,
+        source_start=0,
+    )
+
+    restored = (
+        paged_kv_cache.materialize_request_kv(
+            block_table=block_table,
+            num_tokens=num_tokens,
+        )
+    )
+
+    assert len(restored) == len(original)
+
+    for (
+        original_layer,
+        restored_layer,
+    ) in zip(original, restored):
+        original_key, original_value = (
+            original_layer
+        )
+
+        restored_key, restored_value = (
+            restored_layer
+        )
+
+        torch.testing.assert_close(
+            restored_key,
+            original_key,
+        )
+
+        torch.testing.assert_close(
+            restored_value,
+            original_value,
+        )
+
+# final real-model decode integration test.
+@pytest.mark.integration
+def test_real_model_decode_round_trip_through_paged_kv() -> None:
+    runner = PyTorchModelRunner(
+        model_name="Qwen/Qwen2.5-0.5B-Instruct",
+        device="cuda",
+        dtype=torch.float16,
+    )
+
+    # -------------------------------------------------
+    # 1. Real prefill
+    # -------------------------------------------------
+
+    prompt = "The capital of France is"
+
+    input_ids_tensor = runner.encode_prompt(
+        prompt
+    )
+
+    # Adapt this section to your existing PrefillBatch API
+    # if runner.prefill_batch() requires a PrefillBatch.
+    attention_mask = torch.ones_like(
+        input_ids_tensor,
+        dtype=torch.long,
+        device=runner.device,
+    )
+
+    position_ids = torch.arange(
+        input_ids_tensor.shape[1],
+        dtype=torch.long,
+        device=runner.device,
+    ).unsqueeze(0)
+
+    prefill_batch = PrefillBatch(
+        request_ids=["A"],
+        input_ids=input_ids_tensor.to(
+            runner.device
+        ),
+        attention_mask=attention_mask,
+        position_ids=position_ids,
+    )
+
+    prefill_output = runner.prefill_batch(
+        prefill_batch
+    )
+
+    original_prefill_kv = (
+        prefill_output.past_key_values
+    )
+
+    assert original_prefill_kv is not None
+
+    first_key = original_prefill_kv[0][0]
+
+    num_layers = len(
+        original_prefill_kv
+    )
+    num_kv_heads = int(
+        first_key.shape[1]
+    )
+    prompt_kv_length = int(
+        first_key.shape[2]
+    )
+    head_dim = int(
+        first_key.shape[3]
+    )
+
+    assert prompt_kv_length == (
+        input_ids_tensor.shape[1]
+    )
+
+    # -------------------------------------------------
+    # 2. Create paged storage
+    # -------------------------------------------------
+
+    block_size = 4
+
+    # Need enough capacity for prompt + one decode token.
+    max_tokens_needed = (
+        prompt_kv_length + 1
+    )
+
+    num_blocks_needed = (
+        max_tokens_needed
+        + block_size
+        - 1
+    ) // block_size
+
+    paged_kv_cache = PagedKVCache(
+        num_layers=num_layers,
+        num_blocks=num_blocks_needed + 2,
+        num_kv_heads=num_kv_heads,
+        block_size=block_size,
+        head_dim=head_dim,
+        dtype=first_key.dtype,
+        device=first_key.device,
+    )
+
+    block_table = list(
+        range(num_blocks_needed)
+    )
+
+    # -------------------------------------------------
+    # 3. Persist prefill KV
+    # -------------------------------------------------
+
+    paged_kv_cache.write_request_kv(
+        block_table=block_table,
+        past_key_values=original_prefill_kv,
+        num_tokens=prompt_kv_length,
+        source_start=0,
+    )
+
+    materialized_prefill_kv = (
+        paged_kv_cache.materialize_request_kv(
+            block_table=block_table,
+            num_tokens=prompt_kv_length,
+        )
+    )
+
+    for (
+        original_layer,
+        materialized_layer,
+    ) in zip(
+        original_prefill_kv,
+        materialized_prefill_kv,
+    ):
+        original_key, original_value = (
+            original_layer
+        )
+
+        materialized_key, materialized_value = (
+            materialized_layer
+        )
+
+        torch.testing.assert_close(
+            materialized_key,
+            original_key,
+        )
+
+        torch.testing.assert_close(
+            materialized_value,
+            original_value,
+        )
+
+    # -------------------------------------------------
+    # 4. Real decode using MATERIALIZED paged KV
+    # -------------------------------------------------
+
+    decode_input_id = int(
+        prefill_output.next_token_ids[0]
+    )
+
+    decode_input_ids = torch.tensor(
+        [[decode_input_id]],
+        dtype=torch.long,
+        device=runner.device,
+    )
+
+    # Past KV contains N valid tokens.
+    # Decode input is token N.
+    decode_position_ids = torch.tensor(
+        [[prompt_kv_length]],
+        dtype=torch.long,
+        device=runner.device,
+    )
+
+    decode_attention_mask = torch.ones(
+        (
+            1,
+            prompt_kv_length + 1,
+        ),
+        dtype=torch.long,
+        device=runner.device,
+    )
+
+    decode_batch = DecodeBatch(
+        request_ids=["A"],
+        input_ids=decode_input_ids,
+        past_key_values=materialized_prefill_kv,
+        attention_mask=decode_attention_mask,
+        position_ids=decode_position_ids,
+    )
+
+    decode_output = runner.decode_batch(
+        decode_batch
+    )
+
+    updated_kv = (
+        decode_output.past_key_values
+    )
+
+    assert updated_kv is not None
+
+    new_kv_length = (
+        get_kv_sequence_length(
+            updated_kv
+        )
+    )
+
+    assert new_kv_length == (
+        prompt_kv_length + 1
+    )
+
+    # -------------------------------------------------
+    # 5. Write decode result back into paged storage
+    # -------------------------------------------------
+
+    paged_kv_cache.write_request_kv(
+        block_table=block_table,
+        past_key_values=updated_kv,
+        num_tokens=new_kv_length,
+        source_start=0,
+    )
+
+    restored_after_decode = (
+        paged_kv_cache.materialize_request_kv(
+            block_table=block_table,
+            num_tokens=new_kv_length,
+        )
+    )
+
+    # -------------------------------------------------
+    # 6. Paged representation must match real model KV
+    # -------------------------------------------------
+
+    assert len(
+        restored_after_decode
+    ) == len(updated_kv)
+
+    for (
+        model_layer,
+        paged_layer,
+    ) in zip(
+        updated_kv,
+        restored_after_decode,
+    ):
+        model_key, model_value = (
+            model_layer
+        )
+
+        paged_key, paged_value = (
+            paged_layer
+        )
+
+        torch.testing.assert_close(
+            paged_key,
+            model_key,
+        )
+
+        torch.testing.assert_close(
+            paged_value,
+            model_value,
         )

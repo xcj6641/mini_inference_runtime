@@ -323,10 +323,19 @@ class ContinuousScheduler:
         if not requests:
             return [], {}
 
+        input_request_cache = [
+            self.paged_kv_cache.materialize_request_kv(
+                block_table=request.block_table,
+                num_tokens=request.kv_tokens,
+            )
+            for request in requests
+        ]
+
         batch = (
             self.batch_builder
-            .build_equal_length_decode_batch(
+            .build_decode_batch(
                 requests,
+                per_request_caches=input_request_cache,
                 device=self.runner.device,
             )
         )
@@ -339,13 +348,13 @@ class ContinuousScheduler:
                 "match request count"
             )
 
-        per_request_caches = (
+        output_request_caches = (
             split_legacy_kv_cache(
                 output.past_key_values
             )
         )
 
-        if len(per_request_caches) != len(requests):
+        if len(output_request_caches) != len(requests):
             raise RuntimeError(
                 "Decode output KV cache batch size "
                 "does not match request count"
@@ -359,13 +368,35 @@ class ContinuousScheduler:
                 output.next_token_ids[index]
             )
 
+            updated_cache = output_request_caches[index]
+
+            new_kv_tokens = request.kv_tokens + 1
+
+            # Temporary old/reference path.
             request.attach_kv_cache(
-                per_request_caches[index]
+                updated_cache
             )
+
+            # New paged persistent path.
+            physical_kv_length = (
+                updated_cache[0][0].shape[2]
+            )
+
+            source_start = (
+                physical_kv_length - new_kv_tokens
+            )
+
+            self.paged_kv_cache.write_request_kv(
+                block_table=request.block_table,
+                past_key_values=updated_cache,
+                num_tokens=new_kv_tokens,
+                source_start=source_start,
+            )
+
             request.increment_kv_tokens()
 
             request.append_generated_token(
-                token_id=next_token_id  
+                token_id=next_token_id
             )
 
             decoded_request_ids.append(

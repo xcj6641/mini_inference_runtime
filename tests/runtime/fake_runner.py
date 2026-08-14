@@ -2,7 +2,7 @@ import torch
 from app.runtime.request import Request
 from app.runtime.types import BatchedPrefillOutput, BatchedDecodeOutput
 from app.runtime.kv_cache_utils import get_kv_sequence_length
-from app.runtime.batch import PrefillBatch
+from app.runtime.batch import DecodeBatch, PrefillBatch
 
 class FakeRunner:
     def __init__(
@@ -13,6 +13,8 @@ class FakeRunner:
         ) -> None:
         self.prefill_calls: list[list[str]] = []
         self.decode_calls: list[list[str]] = []
+
+        self.decode_counts: dict[str, int] = {}
 
         self.eos_token_ids: set[int] = {9999}
         self.eos_on_decode_for: set[str] = set()
@@ -121,53 +123,63 @@ class FakeRunner:
 
     def decode_batch(
         self,
-        requests: list[Request],
+        batch: DecodeBatch,
     ) -> BatchedDecodeOutput:
         self.decode_calls.append(
-            [
-                request.request_id
-                for request in requests
-            ]
+            list(batch.request_ids)
         )
 
-        batch_size = len(requests)
+        batch_size = int(
+            batch.input_ids.shape[0]
+        )
 
         old_physical_kv_length = (
             get_kv_sequence_length(
-                requests[0].past_key_values
+                batch.past_key_values
             )
         )
 
         next_token_ids: list[int] = []
 
-        for request in requests:
+        for request_id in batch.request_ids:
+            decode_count = self.decode_counts.get(
+                request_id,
+                0,
+            )
+
             if (
-                request.request_id
+                request_id
                 in self.eos_on_decode_for
             ):
                 next_token_id = 9999
             else:
                 next_token_id = (
-                    2000
-                    + request.generated_tokens_count
+                    2000 + decode_count
                 )
 
-            next_token_ids.append(next_token_id)
+            next_token_ids.append(
+                next_token_id
+            )
+
+            self.decode_counts[request_id] = (
+                decode_count + 1
+            )
 
         return BatchedDecodeOutput(
             next_token_ids=next_token_ids,
-            past_key_values=self._make_batched_kv_cache(
-                batch_size=batch_size,
-                sequence_length=(
-                    old_physical_kv_length + 1
-                ),
+            past_key_values=(
+                self._make_batched_kv_cache(
+                    batch_size=batch_size,
+                    sequence_length=(
+                        old_physical_kv_length + 1
+                    ),
+                )
             ),
             logits=self._make_logits(
                 batch_size=batch_size,
                 sequence_length=1,
             ),
         )
-
 
 class FakeBatchBuilder:
     def __init__(self) -> None:

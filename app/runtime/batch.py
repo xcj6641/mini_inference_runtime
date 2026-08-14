@@ -54,6 +54,7 @@ from typing import Any
 import torch
 
 
+# position_ids: This matters especially for models such as Qwen that use RoPE (Rotary Position Embeddings
 @dataclass(frozen=True)
 class DecodeBatch:
     request_ids: list[str]

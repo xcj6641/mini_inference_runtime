@@ -420,3 +420,66 @@ def move_cache_to_device(
         )
 
     return tuple(moved_layers)
+
+def left_pad_legacy_kv_cache(
+    past_key_values,
+    *,
+    target_length: int,
+):
+        current_length = get_kv_sequence_length(
+            past_key_values
+        )
+
+        if current_length > target_length:
+            raise ValueError(
+                "target_length cannot be shorter "
+                "than current KV length"
+            )
+
+        pad_length = (
+            target_length - current_length
+        )
+
+        if pad_length == 0:
+            return past_key_values
+
+        padded_layers = []
+
+        for key, value in past_key_values:
+            key_padding = torch.zeros(
+                (
+                    key.shape[0],
+                    key.shape[1],
+                    pad_length,
+                    key.shape[3],
+                ),
+                dtype=key.dtype,
+                device=key.device,
+            )
+
+            value_padding = torch.zeros(
+                (
+                    value.shape[0],
+                    value.shape[1],
+                    pad_length,
+                    value.shape[3],
+                ),
+                dtype=value.dtype,
+                device=value.device,
+            )
+
+            padded_key = torch.cat(
+                [key_padding, key],
+                dim=2,
+            )
+
+            padded_value = torch.cat(
+                [value_padding, value],
+                dim=2,
+            )
+
+            padded_layers.append(
+                (padded_key, padded_value)
+            )
+
+        return tuple(padded_layers)
