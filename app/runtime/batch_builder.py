@@ -60,7 +60,6 @@ class BatchBuilder:
             attention_mask=attention_mask,
         )
     
-
     def build_prefill_batch(
         self,
         requests: list[Request],

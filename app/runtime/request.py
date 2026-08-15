@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
 
 from app.runtime.types import RequestState
 
@@ -16,7 +15,7 @@ class Request:
     # rather than sharing a single list across all instances.
     # When using List[int] = [], Python creates the default value once, when the class is defined.
     generated_ids: list[int] = field(default_factory=list)
-    past_key_values: Any | None = None
+    # past_key_values: Any | None = None
 
     prompt_tokens: int = 0  # number of tokens in the prompt
     generated_tokens_count: int = 0
@@ -57,26 +56,22 @@ class Request:
         self.prompt_tokens = len(self.input_ids)
 
     @property
-    def has_kv_cache(self) -> bool:
-        return self.past_key_values is not None
-
-    @property
     def total_sequence_length(self) -> int:
         return (
             self.prompt_tokens
             + self.generated_tokens_count
         )
 
-    def attach_kv_cache(
-        self,
-        past_key_values: Any,
-    ) -> None:
-        if past_key_values is None:
-            raise ValueError(
-                "past_key_values cannot be None"
-            )
+    # def attach_kv_cache(
+    #     self,
+    #     past_key_values: Any,
+    # ) -> None:
+    #     if past_key_values is None:
+    #         raise ValueError(
+    #             "past_key_values cannot be None"
+    #         )
 
-        self.past_key_values = past_key_values
+    #     self.past_key_values = past_key_values
 
     def append_generated_token(
         self,
@@ -87,10 +82,6 @@ class Request:
 
         self.generated_ids.append(token_id)
         self.generated_tokens_count += 1
-
-    def release_kv_cache(self) -> None:
-        self.past_key_values = None
-        self.kv_tokens = 0
 
     def set_kv_tokens_from_prompt(self) -> None:
         self.kv_tokens = len(self.input_ids)
@@ -107,12 +98,10 @@ class Request:
     ) -> None:
         self.state = RequestState.FINISHED
         self.finish_reason = finish_reason
-        self.release_kv_cache()
 
     def cancel(self) -> None:
         self.state = RequestState.CANCELLED
         self.finish_reason = "cancelled"
-        self.release_kv_cache()
 
     def mark_failed(
         self,
@@ -121,4 +110,3 @@ class Request:
         self.state = RequestState.FAILED
         self.finish_reason = "error"
         self.error_message = str(error)
-        self.release_kv_cache()

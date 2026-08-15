@@ -6,7 +6,6 @@ from app.runtime.request import Request, RequestState
 from app.runtime.scheduler_result import StepResult
 from app.runtime.kv_cache_utils import (
     split_legacy_kv_cache,
-    get_kv_sequence_length,
 )
 from app.runtime.paged_kv_cache import PagedKVCache
 
@@ -188,10 +187,10 @@ class ContinuousScheduler:
             )
 
             per_request_cache = per_request_caches[index]
-            # Temporay old path.
-            request.attach_kv_cache(
-                per_request_cache
-            )
+            # # Temporay old path.
+            # request.attach_kv_cache(
+            #     per_request_cache
+            # )
             # New paged path.
             physical_kv_length = per_request_cache[0][0].shape[2]
             source_start = physical_kv_length - request.kv_tokens
@@ -237,13 +236,6 @@ class ContinuousScheduler:
         self,
         request: Request,
     ) -> int:
-        if request.past_key_values is None:
-            raise ValueError(
-                "Decode request must have KV cache"
-            )
-
-        # your scheduler can now use: request.kv_tokens + 1 for block planning, 
-        # while still using physical past_key_values length only to decide whether requests can be stacked into the same decode batch.
         return request.kv_tokens + 1
 
     def _select_decode_requests(
@@ -256,17 +248,10 @@ class ContinuousScheduler:
         )
 
         required_blocks = 0
-        target_kv_length: int | None = None
 
         for request in self.active.values():
             if request.state != RequestState.DECODING:
                 continue
-
-            if request.past_key_values is None:
-                raise RuntimeError(
-                    f"Request {request.request_id} "
-                    "has no KV cache"
-                )
 
             if (
                 len(selected)
@@ -274,15 +259,6 @@ class ContinuousScheduler:
             ):
                 break
 
-            kv_length = get_kv_sequence_length(
-                request.past_key_values
-            )
-
-            if (
-                target_kv_length is not None
-                and kv_length != target_kv_length
-            ):
-                continue
 
             token_requirement = (
                 self._decode_token_requirement(
@@ -310,9 +286,6 @@ class ContinuousScheduler:
             required_blocks += (
                 additional_blocks
             )
-
-            if target_kv_length is None:
-                target_kv_length = kv_length
 
         return selected
 
@@ -372,10 +345,10 @@ class ContinuousScheduler:
 
             new_kv_tokens = request.kv_tokens + 1
 
-            # Temporary old/reference path.
-            request.attach_kv_cache(
-                updated_cache
-            )
+            # # Temporary old/reference path.
+            # request.attach_kv_cache(
+            #     updated_cache
+            # )
 
             # New paged persistent path.
             physical_kv_length = (
@@ -431,7 +404,7 @@ class ContinuousScheduler:
 
         self.block_manager.free(request)
 
-        request.release_kv_cache()
+        # request.kv_tokens = 0
 
         self.completed[request.request_id] = request
 
