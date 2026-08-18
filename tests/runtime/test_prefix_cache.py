@@ -1,0 +1,634 @@
+from app.runtime.request import Request
+
+from app.runtime.prefix_cache import PrefixCache
+
+
+def test_prefix_cache_miss_returns_none(block_manager) -> None:
+    cache = PrefixCache(block_manager)
+
+    result = cache.lookup([10, 11, 12, 13])
+
+    assert result is None
+
+
+def test_prefix_cache_insert_then_lookup(
+    block_manager,
+) -> None:
+    request = make_request(
+        request_id="A",
+        input_ids=[10, 11, 12, 13],
+    )
+
+    block_manager.ensure_capacity(
+        request=request,
+        total_tokens=4,
+    )
+
+    block_id = request.block_table[0]
+
+    cache = PrefixCache(block_manager)
+
+    cache.insert(
+        token_ids=[10, 11, 12, 13],
+        block_ids=[block_id],
+    )
+
+    result = cache.lookup(
+        [10, 11, 12, 13]
+    )
+
+    assert result is not None
+    assert result.token_ids == (
+        10, 11, 12, 13
+    )
+    assert result.block_ids == (
+        block_id,
+    )
+
+
+def test_prefix_cache_different_prefix_misses(
+    block_manager,
+) -> None:
+    request = make_request(
+        request_id="A",
+        input_ids=[10, 11, 12, 13],
+    )
+
+    block_manager.ensure_capacity(
+        request=request,
+        total_tokens=4,
+    )
+
+    block_id = request.block_table[0]
+
+    cache = PrefixCache(block_manager)
+
+    cache.insert(
+        token_ids=[10, 11, 12, 13],
+        block_ids=[block_id],
+    )
+
+    result = cache.lookup(
+        [10, 11, 12, 99]
+    )
+
+    assert result is None
+
+
+def test_prefix_cache_same_prefix_hits(
+    block_manager,
+) -> None:
+    request = make_request(
+        request_id="A",
+        input_ids=[10, 11, 12, 13],
+    )
+
+    block_manager.ensure_capacity(
+        request=request,
+        total_tokens=4,
+    )
+
+    block_id = request.block_table[0]
+
+    cache = PrefixCache(block_manager)
+
+    cache.insert(
+        token_ids=[10, 11, 12, 13],
+        block_ids=[block_id],
+    )
+
+    result = cache.lookup(
+        [10, 11, 12, 13]
+    )
+
+    assert result is not None
+    assert result.block_ids == (
+        block_id,
+    )
+
+def test_cacheable_prefix_uses_only_full_blocks() -> None:
+    assert (
+        PrefixCache.get_cacheable_prefix_length(
+            num_tokens=6,
+            block_size=4,
+        )
+        == 4
+    )
+
+
+def test_cacheable_prefix_can_include_multiple_full_blocks() -> None:
+    assert (
+        PrefixCache.get_cacheable_prefix_length(
+            num_tokens=8,
+            block_size=4,
+        )
+        == 8
+    )
+
+
+def test_cacheable_prefix_zero_when_no_full_block() -> None:
+    assert (
+        PrefixCache.get_cacheable_prefix_length(
+            num_tokens=3,
+            block_size=4,
+        )
+        == 0
+    )
+
+
+# test paged kv cache integration with continuous scheduler
+def make_request(
+    request_id: str,
+    max_new_tokens: int = 4,
+    input_ids: list[int] | None = None,
+) -> Request:
+    if input_ids is None:
+        input_ids = [1, 2, 3]
+
+    return Request(
+        request_id=request_id,
+        input_ids=list(input_ids),
+        max_new_tokens=max_new_tokens,
+    )
+
+
+def test_retain_block_increments_ref_count(
+    block_manager,
+) -> None:
+    request = make_request(
+        request_id="A",
+        input_ids=[1, 2, 3, 4],
+    )
+
+    block_manager.ensure_capacity(
+        request=request,
+        total_tokens=4,
+    )
+
+    block_id = request.block_table[0]
+
+    assert (
+        block_manager.get_ref_count(block_id)
+        == 1
+    )
+
+    block_manager.retain_blocks([block_id])
+
+    assert (
+        block_manager.get_ref_count(block_id)
+        == 2
+    )
+
+def test_release_shared_block_does_not_free_it(
+    block_manager,
+) -> None:
+    request = make_request(
+        request_id="A",
+        input_ids=[1, 2, 3, 4],
+    )
+
+    block_manager.ensure_capacity(
+        request=request,
+        total_tokens=4,
+    )
+
+    block_id = request.block_table[0]
+
+    block_manager.retain_blocks([block_id])
+
+    block_manager.release_blocks([block_id])
+
+    assert (
+        block_manager.get_ref_count(block_id)
+        == 1
+    )
+
+    assert block_id not in block_manager._free_blocks
+
+def test_final_release_returns_block_to_free_list(
+    block_manager,
+) -> None:
+    
+    request = make_request(
+        request_id="A",
+        input_ids=[1, 2, 3, 4],
+    )
+
+    # allocate
+    block_manager.ensure_capacity(
+        request=request,
+        total_tokens=4,
+    )
+
+    block_id = request.block_table[0]
+
+    assert (
+        block_manager.get_ref_count(block_id)
+        == 1
+    )
+
+    # retain
+    block_manager.retain_blocks([block_id])
+    assert(
+        block_manager.get_ref_count(block_id)
+        == 2
+    )
+
+    # release
+    block_manager.release_blocks([block_id])
+    assert (
+        block_manager.get_ref_count(block_id)
+        == 1
+    )
+    # release
+    block_manager.release_blocks([block_id])
+    assert (
+        block_manager.get_ref_count(block_id)
+        == 0
+    )
+
+# test evicts
+def test_evicts_blocks_when_capacity_exceeded(block_manager)-> None:
+        initial_free_blocks = len(block_manager._free_blocks)
+        request = make_request(
+            request_id="A",
+            input_ids=[1, 2, 3, 4],
+        )
+    
+        # A allocates block 2
+        # ref = 1
+        block_manager.ensure_capacity(
+            request=request,
+            total_tokens=4,
+        )
+    
+        block_id = request.block_table[0]
+    
+        assert (
+            block_manager.get_ref_count(block_id)
+            == 1
+        )
+
+        # PrefixCache inserts block 2
+        # ref = 2
+        prefix_cache = PrefixCache(block_manager)
+        prefix_cache.insert(
+            token_ids=[1,2,3,4],
+            block_ids=[block_id],
+        )
+        assert(
+            block_manager.get_ref_count(block_id)
+            == 2
+        )
+
+        # A releases block 2
+        # ref = 1
+        block_manager.release_blocks([block_id])
+        assert(
+            block_manager.get_ref_count(block_id) == 1
+        )
+        assert block_id not in block_manager._free_blocks
+
+        # cache evicts
+        # ref = 0
+        # block returned to free list
+        prefix_cache.evict(
+            token_ids = [1,2,3,4]
+        )
+        assert(
+            block_manager.get_ref_count(block_id) == 0
+        )
+        assert block_id in block_manager._free_blocks
+        assert block_id not in block_manager._ref_counts
+
+        assert(len(block_manager._free_blocks) == initial_free_blocks)
+
+def test_second_request_reuses_cached_prefix_block(
+    block_manager,
+) -> None:
+    request_a = make_request(
+        request_id="A",
+        input_ids=[10, 11, 12, 13, 14, 15],
+    )
+
+    block_manager.ensure_capacity(
+        request=request_a,
+        total_tokens=6,
+    )
+
+    # A owns two blocks:
+    #
+    # block 0 -> tokens 0..3
+    # block 1 -> tokens 4..5
+    #
+    prefix_block_id = request_a.block_table[0]
+
+    assert (
+        block_manager.get_ref_count(
+            prefix_block_id
+        )
+        == 1
+    )
+
+    prefix_cache = PrefixCache(
+        block_manager
+    )
+
+    # Cache only the first full block.
+    prefix_cache.insert(
+        token_ids=[10, 11, 12, 13],
+        block_ids=[prefix_block_id],
+    )
+
+    # A + PrefixCache
+    assert (
+        block_manager.get_ref_count(
+            prefix_block_id
+        )
+        == 2
+    )
+
+    request_b = make_request(
+        request_id="B",
+        input_ids=[10, 11, 12, 13, 99, 100],
+    )
+
+    entry = prefix_cache.lookup(
+        [10, 11, 12, 13]
+    )
+
+    assert entry is not None
+
+    # Attach the shared prefix to B.
+    request_b.block_table.extend(
+        entry.block_ids
+    )
+
+    request_b.kv_tokens = len(
+        entry.token_ids
+    )
+
+    block_manager.retain_blocks(
+        entry.block_ids
+    )
+
+    # A and B point to the exact same
+    # physical prefix block.
+    assert (
+        request_a.block_table[0]
+        == request_b.block_table[0]
+    )
+
+    assert (
+        request_b.block_table[0]
+        == prefix_block_id
+    )
+
+    # Owners:
+    # A + PrefixCache + B
+    assert (
+        block_manager.get_ref_count(
+            prefix_block_id
+        )
+        == 3
+    )
+
+    assert request_b.kv_tokens == 4
+
+def test_releasing_first_request_keeps_shared_prefix_alive(
+    block_manager,
+) -> None:
+    request_a = make_request(
+        request_id="A",
+        input_ids=[10, 11, 12, 13],
+    )
+
+    block_manager.ensure_capacity(
+        request=request_a,
+        total_tokens=4,
+    )
+
+    prefix_block_id = (
+        request_a.block_table[0]
+    )
+
+    prefix_cache = PrefixCache(
+        block_manager
+    )
+
+    prefix_cache.insert(
+        token_ids=[10, 11, 12, 13],
+        block_ids=[prefix_block_id],
+    )
+
+    request_b = make_request(
+        request_id="B",
+        input_ids=[10, 11, 12, 13, 99, 100],
+    )
+
+    entry = prefix_cache.lookup(
+        [10, 11, 12, 13]
+    )
+
+    assert entry is not None
+
+    request_b.block_table.extend(
+        entry.block_ids
+    )
+
+    request_b.kv_tokens = len(
+        entry.token_ids
+    )
+
+    block_manager.retain_blocks(
+        entry.block_ids
+    )
+
+    # A + cache + B
+    assert (
+        block_manager.get_ref_count(
+            prefix_block_id
+        )
+        == 3
+    )
+
+    # A finishes.
+    block_manager.release_blocks(
+        [prefix_block_id]
+    )
+
+    # cache + B still reference it.
+    assert (
+        block_manager.get_ref_count(
+            prefix_block_id
+        )
+        == 2
+    )
+
+    assert (
+        prefix_block_id
+        not in block_manager._free_blocks
+    )
+
+    # B still points to the same block.
+    assert (
+        request_b.block_table[0]
+        == prefix_block_id
+    )
+
+def test_releasing_b_still_keeps_prefix_for_cache(
+    block_manager,
+) -> None:
+    request_a = make_request(
+        request_id="A",
+        input_ids=[10, 11, 12, 13],
+    )
+
+    block_manager.ensure_capacity(
+        request=request_a,
+        total_tokens=4,
+    )
+
+    prefix_block_id = (
+        request_a.block_table[0]
+    )
+
+    prefix_cache = PrefixCache(
+        block_manager
+    )
+
+    prefix_cache.insert(
+        token_ids=[10, 11, 12, 13],
+        block_ids=[prefix_block_id],
+    )
+
+    request_b = make_request(
+        request_id="B",
+        input_ids=[10, 11, 12, 13, 99],
+    )
+
+    entry = prefix_cache.lookup(
+        [10, 11, 12, 13]
+    )
+
+    assert entry is not None
+
+    request_b.block_table.extend(
+        entry.block_ids
+    )
+
+    request_b.kv_tokens = len(
+        entry.token_ids
+    )
+
+    block_manager.retain_blocks(
+        entry.block_ids
+    )
+
+    # A + cache + B
+    assert (
+        block_manager.get_ref_count(
+            prefix_block_id
+        )
+        == 3
+    )
+
+    # A releases.
+    block_manager.release_blocks(
+        [prefix_block_id]
+    )
+
+    assert (
+        block_manager.get_ref_count(
+            prefix_block_id
+        )
+        == 2
+    )
+
+    # B releases.
+    block_manager.release_blocks(
+        [prefix_block_id]
+    )
+
+    # Cache still owns the block.
+    assert (
+        block_manager.get_ref_count(
+            prefix_block_id
+        )
+        == 1
+    )
+
+    assert (
+        prefix_block_id
+        not in block_manager._free_blocks
+    )
+
+    # Cache eviction releases final reference.
+    prefix_cache.evict(
+        token_ids=[10, 11, 12, 13]
+    )
+
+    assert (
+        block_manager.get_ref_count(
+            prefix_block_id
+        )
+        == 0
+    )
+
+    assert (
+        prefix_block_id
+        in block_manager._free_blocks
+    )
+
+def test_shared_prefix_block_but_private_suffix_blocks(
+    block_manager,
+) -> None:
+    request_a = make_request(
+        request_id = "A",
+        input_ids = [10,11,12,13,14,15],
+    )
+    block_manager.ensure_capacity(
+        request=request_a,
+        total_tokens=6,
+    )
+
+    assert len(request_a.block_table) == 2
+
+    prefix_cache = PrefixCache(block_manager)
+
+    prefix_id_a = request_a.block_table[0]
+    suffix_id_a = request_a.block_table[1]
+
+    prefix_cache.insert(
+        token_ids=[10,11,12,13],
+        block_ids=[prefix_id_a],
+    )
+
+    request_b = make_request(
+        request_id = "B",
+        input_ids = [10,11,12,13,99,100],
+    )
+    entry = prefix_cache.lookup([10,11,12,13])
+
+    assert entry is not None
+
+    request_b.block_table.extend(entry.block_ids)
+    block_manager.retain_blocks(entry.block_ids)
+    request_b.kv_tokens = len(entry.token_ids)
+
+    block_manager.ensure_capacity(
+        request = request_b,
+        total_tokens=6,)
+
+    assert len(request_b.block_table) == 2
+
+    prefix_id_b = request_b.block_table[0]
+    suffix_id_b = request_b.block_table[1]
+
+
+    assert prefix_id_a == prefix_id_b
+    assert suffix_id_a != suffix_id_b
+
+    assert block_manager.get_ref_count(prefix_id_a) == 3
+    assert block_manager.get_ref_count(suffix_id_a) == 1
+    assert block_manager.get_ref_count(suffix_id_b) == 1

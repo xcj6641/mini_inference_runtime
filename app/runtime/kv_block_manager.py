@@ -33,6 +33,8 @@ class KVBlockManager:
         # physical block ID -> request ID
         self._owners: dict[int, str] = {}
 
+        self._ref_counts: dict[int, int] = {}
+
     @property
     def num_free_blocks(self) -> int:
         return len(self._free_blocks)
@@ -113,6 +115,7 @@ class KVBlockManager:
 
         for _ in range(num_blocks):
             block_id = self._free_blocks.popleft()
+            self._ref_counts[block_id] = 1
 
             if block_id in self._owners:
                 raise RuntimeError(
@@ -128,7 +131,6 @@ class KVBlockManager:
         request.block_table.extend(allocated)
 
         return allocated
-
     
     def owner_of(
         self,
@@ -143,6 +145,43 @@ class KVBlockManager:
             )
 
         return self._owners.get(block_id)
+
+    def retain_blocks(
+        self,
+        block_ids: list[int] | tuple[int, ...],
+    ) -> None:
+        for block_id in block_ids:
+            if block_id not in self._ref_counts:
+                raise ValueError(
+                    f"block {block_id} is not allocated"
+                )
+
+            self._ref_counts[block_id] += 1
+
+    def release_blocks(
+        self,
+        block_ids: list[int] | tuple[int, ...],
+    ) -> None:
+        for block_id in block_ids:
+            if block_id not in self._ref_counts:
+                raise ValueError(
+                    f"block {block_id} is not allocated"
+                )
+
+            ref_count = self._ref_counts[block_id]
+
+            if ref_count <= 0:
+                raise RuntimeError(
+                    f"invalid refcount for block {block_id}"
+                )
+
+            ref_count -= 1
+
+            if ref_count == 0:
+                del self._ref_counts[block_id]
+                self._free_blocks.append(block_id)
+            else:
+                self._ref_counts[block_id] = ref_count
 
     def ensure_capacity(
         self,
@@ -185,6 +224,9 @@ class KVBlockManager:
             required_blocks
             - len(request.block_table),
         )
+
+    def get_ref_count(self, block_id: int) -> int:
+        return self._ref_counts.get(block_id, 0)
 
     def free(
         self,
