@@ -22,6 +22,29 @@ class PrefixCache:
         key = tuple(token_ids)
         return self._entries.get(key)
 
+    def lookup_longest_prefix(
+        self,
+        token_ids: list[int],
+        block_size: int,
+    ) -> PrefixCacheEntry | None:
+        cacheable_tokens = (
+            len(token_ids) // block_size
+        ) * block_size
+
+        while cacheable_tokens > 0:
+            key = tuple(
+                token_ids[:cacheable_tokens]
+            )
+
+            entry = self._entries.get(key)
+
+            if entry is not None:
+                return entry
+
+            cacheable_tokens -= block_size
+
+        return None
+
     def insert(
         self,
         token_ids,

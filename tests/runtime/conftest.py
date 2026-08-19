@@ -2,6 +2,7 @@ import pytest
 from app.runtime.batch_builder import BatchBuilder
 from app.runtime.kv_block_manager import KVBlockManager
 from app.runtime.paged_kv_cache import PagedKVCache
+from app.runtime.prefix_cache import PrefixCache
 import torch
 
 from app.runtime.pytorch_model_runner import PyTorchModelRunner
@@ -46,11 +47,20 @@ def paged_kv_cache() -> PagedKVCache:
     )
 
 @pytest.fixture
+def prefix_cache(
+    block_manager: KVBlockManager
+) -> PrefixCache:
+    return PrefixCache(
+        block_manager=block_manager,
+    )
+
+@pytest.fixture
 def scheduler(
     real_runner,
     batch_builder,
-    block_manager,
-    paged_kv_cache
+    block_manager: KVBlockManager,
+    paged_kv_cache: PagedKVCache,
+    prefix_cache : PrefixCache,
 ) -> ContinuousScheduler:
     
     return ContinuousScheduler(
@@ -59,5 +69,6 @@ def scheduler(
         block_manager=block_manager,
         max_prefill_batch_size=4,
         max_decode_batch_size=4,
-        paged_kv_cache=paged_kv_cache
+        paged_kv_cache=paged_kv_cache,
+        prefix_cache=prefix_cache,
     )

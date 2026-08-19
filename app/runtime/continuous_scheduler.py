@@ -8,6 +8,8 @@ from app.runtime.kv_cache_utils import (
     split_legacy_kv_cache,
 )
 from app.runtime.paged_kv_cache import PagedKVCache
+from app.runtime.prefix_cache import PrefixCache, PrefixCacheEntry
+from app.runtime.kv_block_manager import KVBlockManager
 
 
 class ContinuousScheduler:
@@ -17,6 +19,7 @@ class ContinuousScheduler:
         batch_builder,
         block_manager,
         paged_kv_cache: PagedKVCache,
+        prefix_cache,
         max_prefill_batch_size: int = 4,
         max_decode_batch_size: int = 4,
     ) -> None:
@@ -34,6 +37,7 @@ class ContinuousScheduler:
         self.batch_builder = batch_builder
         self.block_manager = block_manager
         self.paged_kv_cache = paged_kv_cache
+        self.prefix_cache = prefix_cache
         self.max_prefill_batch_size = (
             max_prefill_batch_size
         )
@@ -85,62 +89,200 @@ class ContinuousScheduler:
             f"Unknown request ID: {request_id}"
         )
 
-    # Select requests whose total kv block requirements do not exceed available blocks.
+    def _try_attach_longest_cached_prefix(
+        self,
+        request: Request,
+        entry: PrefixCacheEntry,
+    ) -> None:
+        request.block_table.extend(
+            entry.block_ids
+        )
+
+        request.kv_tokens += len(
+            entry.token_ids
+        )
+
+        self.block_manager.retain_blocks(
+            entry.block_ids
+        )
+
+
+    def _detach_cached_prefix(
+        self,
+        request: Request,
+        entry: PrefixCacheEntry,
+    ) -> None:
+        self.block_manager.release_blocks(
+            entry.block_ids
+        )
+
+        num_blocks = len(entry.block_ids)
+
+        if num_blocks > 0:
+            del request.block_table[-num_blocks:]
+
+        request.kv_tokens -= len(
+            entry.token_ids
+        )
+
+
     def _select_prefill_requests(
         self,
     ) -> list[Request]:
         selected: list[Request] = []
-        remaining = deque()
 
-        available_blocks = (
-            self.block_manager.num_free_blocks
-        )
-
-        required_blocks = 0
-
-        while self.waiting:
-            request = self.waiting.popleft()
-
+        for request in self.waiting:
             if (
                 len(selected)
                 >= self.max_prefill_batch_size
             ):
-                remaining.append(request)
-                continue
+                break
 
-            additional_blocks = (
-                self.block_manager
-                .additional_blocks_required(
-                    request,
-                    self._prefill_token_requirement(
-                        request
+            entry = (
+                self.prefix_cache.lookup_longest_prefix(
+                    token_ids=request.input_ids,
+                    block_size=(
+                        self.block_manager.block_size
                     ),
                 )
             )
 
+            if entry is not None:
+                self._try_attach_longest_cached_prefix(
+                    request=request,
+                    entry=entry,
+                )
+
+            total_block_requirement = (
+                len(request.input_ids)
+                + self.block_manager.block_size
+                - 1
+            ) // self.block_manager.block_size
+
+            additional_blocks = (
+                total_block_requirement
+                - len(request.block_table)
+            )
+
             if (
-                required_blocks
-                + additional_blocks
-                > available_blocks
+                additional_blocks
+                > self.block_manager.num_free_blocks
             ):
-                remaining.append(request)
+                if entry is not None:
+                    self._detach_cached_prefix(
+                        request=request,
+                        entry=entry,
+                    )
+
                 continue
+
+            self.block_manager.ensure_capacity(
+                request=request,
+                total_tokens=len(
+                    request.input_ids
+                ),
+            )
 
             selected.append(request)
 
-            required_blocks += (
-                additional_blocks
-            )
-
-        self.waiting = remaining
-
         return selected
+        
+    # Select requests whose total kv block requirements do not exceed available blocks.
+    # def _select_prefill_requests(
+    #     self,
+    # ) -> list[Request]:
+    #     selected: list[Request] = []
+    #     remaining = deque()
+
+    #     available_blocks = (
+    #         self.block_manager.num_free_blocks
+    #     )
+
+    #     required_blocks = 0
+
+    #     while self.waiting:
+    #         request = self.waiting.popleft()
+
+    #         if (
+    #             len(selected)
+    #             >= self.max_prefill_batch_size
+    #         ):
+    #             remaining.append(request)
+    #             continue
+
+    #         additional_blocks = (
+    #             self.block_manager
+    #             .additional_blocks_required(
+    #                 request,
+    #                 self._prefill_token_requirement(
+    #                     request
+    #                 ),
+    #             )
+    #         )
+
+    #         if (
+    #             required_blocks
+    #             + additional_blocks
+    #             > available_blocks
+    #         ):
+    #             remaining.append(request)
+    #             continue
+
+    #         selected.append(request)
+
+    #         required_blocks += (
+    #             additional_blocks
+    #         )
+
+    #     self.waiting = remaining
+
+    #     return selected
 
     def _prefill_token_requirement(
         self,
         request: Request,
     ) -> int:
         return len(request.input_ids)
+
+    def _try_attach_cached_prefix(
+        self,
+        request: Request,
+    ) -> int:
+        cacheable_tokens = (
+            PrefixCache.get_cacheable_prefix_length(
+                num_tokens=len(request.input_ids),
+                block_size=self.block_manager.block_size,
+            )
+        )
+
+        if cacheable_tokens == 0:
+            return 0
+
+        prefix_tokens = request.input_ids[
+            :cacheable_tokens
+        ]
+
+        entry = self.prefix_cache.lookup_longest_prefix(
+            token_ids=request.input_ids,
+            block_size=self.block_manager.block_size,
+        )
+
+        if entry is None:
+            return 0
+
+        request.block_table.extend(
+            entry.block_ids
+        )
+
+        self.block_manager.retain_blocks(
+            entry.block_ids
+        )
+
+        request.kv_tokens = len(
+            entry.token_ids
+        )
+
+        return request.kv_tokens
 
     def _run_prefill(
         self,

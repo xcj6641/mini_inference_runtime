@@ -632,3 +632,171 @@ def test_shared_prefix_block_but_private_suffix_blocks(
     assert block_manager.get_ref_count(prefix_id_a) == 3
     assert block_manager.get_ref_count(suffix_id_a) == 1
     assert block_manager.get_ref_count(suffix_id_b) == 1
+
+# test prefix cache integrate with scheduler
+def test_select_prefill_request_uses_cached_prefix_blocks(
+    scheduler,
+    block_manager,
+    prefix_cache,
+) -> None:
+    # A owns a full cached prefix block.
+    request_a = make_request(
+        request_id="A",
+        input_ids=[10, 11, 12, 13],
+    )
+
+    block_manager.ensure_capacity(
+        request=request_a,
+        total_tokens=4,
+    )
+
+    shared_block = request_a.block_table[0]
+
+    prefix_cache.insert(
+        token_ids=[10, 11, 12, 13],
+        block_ids=[shared_block],
+    )
+
+    # B needs 6 tokens total:
+    # 4 cached + 2 uncached.
+    request_b = make_request(
+        request_id="B",
+        input_ids=[10, 11, 12, 13, 99, 100],
+    )
+
+    scheduler.add_request(request_b)
+
+    selected = scheduler._select_prefill_requests()
+
+    assert request_b in selected
+
+    assert request_b.block_table[0] == shared_block
+
+    assert request_b.kv_tokens == 4
+
+    # One shared block + one private suffix block.
+    assert len(request_b.block_table) == 2
+
+    assert request_b.block_table[1] != shared_block
+
+    # A + cache + B
+    assert (
+        block_manager.get_ref_count(shared_block)
+        == 3
+    )
+
+def test_select_prefill_rolls_back_cached_prefix_when_no_capacity(
+    scheduler,
+    block_manager,
+    prefix_cache,
+) -> None:
+    request_a = make_request(
+        request_id="A",
+        input_ids=[10, 11, 12, 13],
+    )
+
+    block_manager.ensure_capacity(
+        request=request_a,
+        total_tokens=4,
+    )
+
+    shared_block = request_a.block_table[0]
+
+    prefix_cache.insert(
+        token_ids=[10, 11, 12, 13],
+        block_ids=[shared_block],
+    )
+
+    initial_ref_count = (
+        block_manager.get_ref_count(
+            shared_block
+        )
+    )
+
+    # Consume all remaining free blocks.
+    while block_manager.num_free_blocks > 0:
+        dummy = make_request(
+            request_id=f"dummy-{block_manager.num_free_blocks}",
+            input_ids=[1, 2, 3, 4],
+        )
+
+        block_manager.ensure_capacity(
+            request=dummy,
+            total_tokens=4,
+        )
+
+    request_b = make_request(
+        request_id="B",
+        input_ids=[10, 11, 12, 13, 99, 100],
+    )
+
+    scheduler.add_request(request_b)
+
+    selected = scheduler._select_prefill_requests()
+
+    assert request_b not in selected
+
+    # Prefix attachment must have been undone.
+    assert request_b.block_table == []
+
+    assert request_b.kv_tokens == 0
+
+    # Temporary retain must also be undone.
+    assert (
+        block_manager.get_ref_count(
+            shared_block
+        )
+        == initial_ref_count
+    )
+
+def test_select_prefill_uses_shorter_cached_prefix_when_longest_misses(
+    scheduler,
+    block_manager,
+    prefix_cache,
+) -> None:
+    request_a = make_request(
+        request_id="A",
+        input_ids=[10, 11, 12, 13],
+    )
+
+    block_manager.ensure_capacity(
+        request=request_a,
+        total_tokens=4,
+    )
+
+    shared_block = request_a.block_table[0]
+
+    prefix_cache.insert(
+        token_ids=[10, 11, 12, 13],
+        block_ids=[shared_block],
+    )
+
+    request_b = make_request(
+        request_id="B",
+        input_ids=[
+            10, 11, 12, 13,
+            14, 15, 16, 17,
+            18,
+        ],
+    )
+
+    scheduler.add_request(request_b)
+
+    selected = scheduler._select_prefill_requests()
+
+    assert request_b in selected
+
+    # 8-token prefix is not cached,
+    # but 4-token prefix is.
+    assert request_b.kv_tokens == 4
+
+    assert (
+        request_b.block_table[0]
+        == shared_block
+    )
+
+    # 9 tokens / block_size 4
+    # = 3 total blocks.
+    #
+    # 1 reused + 2 newly allocated.
+    assert len(request_b.block_table) == 3
