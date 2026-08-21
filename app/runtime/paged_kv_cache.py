@@ -79,6 +79,111 @@ class PagedKVCache:
 
         return physical_block_id, slot_index
 
+    def write_request_kv_prefix_cache(
+        self,
+        *,
+        block_table: list[int],
+        past_key_values,
+        num_tokens: int,
+        source_start: int = 0,
+        destination_start=0,
+    ) -> None:
+        if num_tokens < 0:
+            raise ValueError("num_tokens must be non-negative")
+
+        if len(past_key_values) != self.num_layers:
+            raise ValueError("unexpected number of KV layers")
+
+        if source_start < 0:
+            raise ValueError("source_start must be non-negative")
+        if destination_start < 0:
+            raise ValueError("destination_start must be non-negative")
+
+        destination_end = (
+            destination_start + num_tokens
+        )
+
+        required_blocks = (
+            destination_end
+            + self.block_size
+            - 1
+        ) // self.block_size
+
+        if required_blocks > len(block_table):
+            raise ValueError(
+                "block_table is too small for destination range"
+            )
+        
+        for layer_idx, (key, value) in enumerate(past_key_values):
+            if key.shape[0] != 1 or value.shape[0] != 1:
+                raise ValueError("only batch size 1 is supported")
+
+            if key.shape[1] != self.num_kv_heads:
+                raise ValueError("unexpected number of KV heads")
+
+            if value.shape[1] != self.num_kv_heads:
+                raise ValueError("unexpected number of KV heads")
+
+            if key.shape[3] != self.head_dim:
+                raise ValueError("unexpected head_dim")
+
+            if value.shape[3] != self.head_dim:
+                raise ValueError("unexpected head_dim")
+            
+            if source_start + num_tokens > key.shape[2]:
+                raise ValueError("source_start and num_tokens exceed key shape")
+                        
+            if source_start + num_tokens > value.shape[2]:
+                raise ValueError("source_start and num_tokens exceed value shape")
+
+            
+            for token_offset in range(num_tokens):
+                # source_token_idx = where to read from the runner-produced contiguous KV tensor, which may contain padding.
+                # logical_token_idx = where this token belongs in the request’s logical KV sequence, which has no padding and is mapped through block_table.
+                source_token_idx = (
+                    source_start + token_offset
+                )
+
+                logical_token_idx = (
+                    destination_start + token_offset
+                )
+
+                logical_block_idx = (
+                    logical_token_idx // self.block_size
+                )
+
+                slot_idx = (
+                    logical_token_idx % self.block_size
+                )
+                physical_block_id = block_table[logical_block_idx]
+
+                self.key_cache[
+                    layer_idx,
+                    physical_block_id,
+                    :,
+                    slot_idx,
+                    :,
+                ] = key[
+                    0,
+                    :,
+                    source_token_idx,
+                    :,
+                ]
+
+                self.value_cache[
+                    layer_idx,
+                    physical_block_id,
+                    :,
+                    slot_idx,
+                    :,
+                ] = value[
+                    0,
+                    :,
+                    source_token_idx,
+                    :,
+                ]
+
+
     def write_request_kv(
         self,
         *,

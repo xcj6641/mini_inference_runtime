@@ -3,6 +3,7 @@ from app.runtime.batch_builder import BatchBuilder
 from app.runtime.continuous_scheduler import ContinuousScheduler
 from app.runtime.kv_block_manager import KVBlockManager
 from app.runtime.pytorch_model_runner import PyTorchModelRunner
+from app.runtime.prefix_cache import PrefixCache
 import torch
 
 from app.runtime.paged_kv_cache import PagedKVCache
@@ -730,6 +731,7 @@ def test_prefill_writes_real_kv_into_paged_cache(
     fake_runner: FakeRunner,
     batch_builder: FakeBatchBuilder,
     block_manager: KVBlockManager,
+    prefix_cache: PrefixCache
 ) -> None:
     paged_kv_cache = PagedKVCache(
         num_layers=1,
@@ -746,6 +748,7 @@ def test_prefill_writes_real_kv_into_paged_cache(
         batch_builder=batch_builder,
         block_manager=block_manager,
         paged_kv_cache=paged_kv_cache,
+        prefix_cache= prefix_cache,
         max_prefill_batch_size=4,
         max_decode_batch_size=4,
     )
@@ -817,6 +820,7 @@ def test_prefill_paged_cache_excludes_left_padding(
     fake_runner: FakeRunner,
     batch_builder: FakeBatchBuilder,
     block_manager: KVBlockManager,
+    prefix_cache: PrefixCache,
 ) -> None:
     paged_kv_cache = PagedKVCache(
         num_layers=1,
@@ -833,6 +837,7 @@ def test_prefill_paged_cache_excludes_left_padding(
         batch_builder=batch_builder,
         block_manager=block_manager,
         paged_kv_cache=paged_kv_cache,
+        prefix_cache= prefix_cache,
         max_prefill_batch_size=4,
         max_decode_batch_size=4,
     )
@@ -1159,6 +1164,7 @@ def test_decode_writes_variable_length_kv_back_to_paged_cache(
     fake_runner: FakeRunner,
     batch_builder: BatchBuilder,
     block_manager: KVBlockManager,
+    prefix_cache: PrefixCache,
 ) -> None:
     paged_kv_cache = PagedKVCache(
         num_layers=1,
@@ -1175,6 +1181,7 @@ def test_decode_writes_variable_length_kv_back_to_paged_cache(
         batch_builder=batch_builder,
         block_manager=block_manager,
         paged_kv_cache=paged_kv_cache,
+        prefix_cache= prefix_cache,
         max_prefill_batch_size=4,
         max_decode_batch_size=4,
     )
@@ -1256,6 +1263,7 @@ def test_decode_crossing_block_boundary_uses_new_block(
     fake_runner: FakeRunner,
     batch_builder: BatchBuilder,
     block_manager: KVBlockManager,
+    prefix_cache: PrefixCache,
 ) -> None:
     paged_kv_cache = PagedKVCache(
         num_layers=1,
@@ -1272,6 +1280,7 @@ def test_decode_crossing_block_boundary_uses_new_block(
         batch_builder=batch_builder,
         block_manager=block_manager,
         paged_kv_cache=paged_kv_cache,
+        prefix_cache= prefix_cache,
         max_prefill_batch_size=4,
         max_decode_batch_size=4,
     )

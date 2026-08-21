@@ -1,5 +1,4 @@
 import pytest
-import torch
 
 from app.runtime.batch_builder import BatchBuilder
 from app.runtime.continuous_scheduler import (
@@ -13,6 +12,7 @@ from app.runtime.pytorch_model_runner import (
     PyTorchModelRunner,
 )
 from app.runtime.paged_kv_cache import PagedKVCache
+from app.runtime.prefix_cache import PrefixCache
 from app.runtime.request import (
     Request,
     RequestState,
@@ -22,20 +22,15 @@ from app.runtime.request import (
 @pytest.mark.integration
 def test_scheduler_decode_updates_real_kv_cache(
     real_runner: PyTorchModelRunner,
+    paged_kv_cache_qwen: PagedKVCache,
 ) -> None:
     block_manager = KVBlockManager(
         num_blocks=2,
         block_size=4,
     )
 
-    paged_kv_cache = PagedKVCache(
-        num_layers=1,
-        num_blocks=32,
-        num_kv_heads=1,
-        block_size=4,
-        head_dim=2,
-        dtype=torch.float32,
-        device="cpu",
+    prefix_cache = PrefixCache(
+        block_manager
     )
 
     scheduler = ContinuousScheduler(
@@ -44,7 +39,8 @@ def test_scheduler_decode_updates_real_kv_cache(
         max_prefill_batch_size=1,
         max_decode_batch_size=1,
         block_manager=block_manager,
-        paged_kv_cache=paged_kv_cache,
+        paged_kv_cache=paged_kv_cache_qwen,
+        prefix_cache=prefix_cache,
     )
 
     input_ids = (
@@ -63,22 +59,44 @@ def test_scheduler_decode_updates_real_kv_cache(
 
     scheduler.add_request(request)
 
-    # Step 1: prefill.
+    # -------------------------
+    # Step 1: prefill
+    # -------------------------
     prefill_result = scheduler.step()
 
     assert prefill_result.prefetched_request_ids == [
         "request-a"
     ]
-    assert prefill_result.decoded_request_ids == []
-    assert request.state in {RequestState.DECODING, RequestState.FINISHED}
-    assert request.past_key_values is not None
+
+    assert (
+        prefill_result.decoded_request_ids
+        == []
+    )
+
+    assert request.state in {
+        RequestState.DECODING,
+        RequestState.FINISHED,
+    }
+
     assert len(request.generated_ids) == 1
-    assert request.generated_tokens_count == 1
-    
+
+    assert (
+        request.generated_tokens_count
+        == 1
+    )
+
+    # Request no longer owns past_key_values.
+    # Materialize KV from PagedKVCache.
+    kv_after_prefill = (
+        paged_kv_cache_qwen.materialize_request_kv(
+            block_table=request.block_table,
+            num_tokens=request.kv_tokens,
+        )
+    )
 
     kv_length_after_prefill = (
         get_kv_sequence_length(
-            request.past_key_values
+            kv_after_prefill
         )
     )
 
@@ -86,29 +104,73 @@ def test_scheduler_decode_updates_real_kv_cache(
         request.input_ids
     )
 
+    assert request.kv_tokens == len(
+        request.input_ids
+    )
+
     first_generated_token = (
         request.generated_ids[0]
     )
 
-    # Step 2: decode the first generated token.
+    # -------------------------
+    # Step 2: decode
+    # -------------------------
+
+    # Before decode, scheduler must have enough
+    # physical blocks for one additional KV token.
+    required_blocks_after_decode = (
+        request.kv_tokens
+        + 1
+        + block_manager.block_size
+        - 1
+    ) // block_manager.block_size
+
+    # This does not require capacity to have been
+    # allocated yet; scheduler.step() may allocate
+    # the extra block during decode selection.
+    assert (
+        len(request.block_table)
+        <= required_blocks_after_decode
+    )
+
     decode_result = scheduler.step()
-    assert decode_result.prefetched_request_ids == []
+
+    assert (
+        decode_result.prefetched_request_ids
+        == []
+    )
+
     assert decode_result.decoded_request_ids == [
         "request-a"
     ]
-    assert request.state in {RequestState.DECODING, RequestState.FINISHED}
-    assert request.past_key_values is not None
+
+    assert request.state in {
+        RequestState.DECODING,
+        RequestState.FINISHED,
+    }
 
     assert len(request.generated_ids) == 2
-    assert request.generated_tokens_count == 2
 
-    assert request.generated_ids[0] == (
-        first_generated_token
+    assert (
+        request.generated_tokens_count
+        == 2
+    )
+
+    assert (
+        request.generated_ids[0]
+        == first_generated_token
+    )
+
+    kv_after_decode = (
+        paged_kv_cache_qwen.materialize_request_kv(
+            block_table=request.block_table,
+            num_tokens=request.kv_tokens,
+        )
     )
 
     kv_length_after_decode = (
         get_kv_sequence_length(
-            request.past_key_values
+            kv_after_decode
         )
     )
 
@@ -117,30 +179,30 @@ def test_scheduler_decode_updates_real_kv_cache(
     )
 
     first_key, first_value = (
-        request.past_key_values[0]
+        kv_after_decode[0]
     )
 
     assert first_key.shape[0] == 1
     assert first_value.shape[0] == 1
-    assert first_key.shape == first_value.shape    
+
+    assert (
+        first_key.shape
+        == first_value.shape
+    )
 
 
 @pytest.mark.integration
 def test_scheduler_real_batched_decode_two_requests(
     real_runner: PyTorchModelRunner,
+    paged_kv_cache_qwen: PagedKVCache,
 ) -> None:
     block_manager = KVBlockManager(
-            num_blocks=8,
-            block_size=4,
-        )
-    paged_kv_cache = PagedKVCache(
-        num_layers=1,
-        num_blocks=32,
-        num_kv_heads=1,
+        num_blocks=8,
         block_size=4,
-        head_dim=2,
-        dtype=torch.float32,
-        device="cpu",
+    )
+
+    prefix_cache = PrefixCache(
+        block_manager
     )
 
     scheduler = ContinuousScheduler(
@@ -149,7 +211,8 @@ def test_scheduler_real_batched_decode_two_requests(
         max_prefill_batch_size=2,
         max_decode_batch_size=2,
         block_manager=block_manager,
-        paged_kv_cache=paged_kv_cache,
+        paged_kv_cache=paged_kv_cache_qwen,
+        prefix_cache=prefix_cache,
     )
 
     input_ids_a = (
@@ -168,7 +231,9 @@ def test_scheduler_real_batched_decode_two_requests(
         .tolist()
     )
 
-    assert len(input_ids_a) == len(input_ids_b)
+    assert len(input_ids_a) == len(
+        input_ids_b
+    )
 
     request_a = Request(
         request_id="request-a",
@@ -185,58 +250,120 @@ def test_scheduler_real_batched_decode_two_requests(
     scheduler.add_request(request_a)
     scheduler.add_request(request_b)
 
-    # Step 1: both requests are prefetched together.
-    scheduler.step()
+    # -------------------------
+    # Step 1: batched prefill
+    # -------------------------
+    prefill_result = scheduler.step()
 
-    assert request_a.state in {RequestState.DECODING, RequestState.FINISHED}
-    assert request_b.state in {RequestState.DECODING, RequestState.FINISHED}
+    assert set(
+        prefill_result.prefetched_request_ids
+    ) == {
+        "request-a",
+        "request-b",
+    }
 
-    assert request_a.past_key_values is not None
-    assert request_b.past_key_values is not None
+    assert request_a.state in {
+        RequestState.DECODING,
+        RequestState.FINISHED,
+    }
+
+    assert request_b.state in {
+        RequestState.DECODING,
+        RequestState.FINISHED,
+    }
 
     assert len(request_a.generated_ids) == 1
     assert len(request_b.generated_ids) == 1
 
+    kv_a_after_prefill = (
+        paged_kv_cache_qwen.materialize_request_kv(
+            block_table=request_a.block_table,
+            num_tokens=request_a.kv_tokens,
+        )
+    )
+
+    kv_b_after_prefill = (
+        paged_kv_cache_qwen.materialize_request_kv(
+            block_table=request_b.block_table,
+            num_tokens=request_b.kv_tokens,
+        )
+    )
+
     kv_length_a_after_prefill = (
         get_kv_sequence_length(
-            request_a.past_key_values
+            kv_a_after_prefill
         )
     )
 
     kv_length_b_after_prefill = (
         get_kv_sequence_length(
-            request_b.past_key_values
+            kv_b_after_prefill
         )
     )
 
-    assert kv_length_a_after_prefill == (
-        kv_length_b_after_prefill
+    assert (
+        kv_length_a_after_prefill
+        == len(request_a.input_ids)
     )
 
-    # Step 2: both requests are decoded together.
-    scheduler.step()
+    assert (
+        kv_length_b_after_prefill
+        == len(request_b.input_ids)
+    )
 
-    assert request_a.state in {RequestState.DECODING, RequestState.FINISHED}
-    assert request_b.state in {RequestState.DECODING, RequestState.FINISHED}
+    assert (
+        kv_length_a_after_prefill
+        == kv_length_b_after_prefill
+    )
 
-    assert request_a.past_key_values is not None
-    assert request_b.past_key_values is not None
+    # -------------------------
+    # Step 2: batched decode
+    # -------------------------
+    decode_result = scheduler.step()
+
+    assert set(
+        decode_result.decoded_request_ids
+    ) == {
+        "request-a",
+        "request-b",
+    }
 
     assert len(request_a.generated_ids) == 2
     assert len(request_b.generated_ids) == 2
 
-    assert request_a.generated_tokens_count == 2
-    assert request_b.generated_tokens_count == 2
+    assert (
+        request_a.generated_tokens_count
+        == 2
+    )
+
+    assert (
+        request_b.generated_tokens_count
+        == 2
+    )
+
+    kv_a_after_decode = (
+        paged_kv_cache_qwen.materialize_request_kv(
+            block_table=request_a.block_table,
+            num_tokens=request_a.kv_tokens,
+        )
+    )
+
+    kv_b_after_decode = (
+        paged_kv_cache_qwen.materialize_request_kv(
+            block_table=request_b.block_table,
+            num_tokens=request_b.kv_tokens,
+        )
+    )
 
     kv_length_a_after_decode = (
         get_kv_sequence_length(
-            request_a.past_key_values
+            kv_a_after_decode
         )
     )
 
     kv_length_b_after_decode = (
         get_kv_sequence_length(
-            request_b.past_key_values
+            kv_b_after_decode
         )
     )
 
@@ -249,48 +376,42 @@ def test_scheduler_real_batched_decode_two_requests(
     )
 
     first_key_a, first_value_a = (
-        request_a.past_key_values[0]
+        kv_a_after_decode[0]
     )
 
     first_key_b, first_value_b = (
-        request_b.past_key_values[0]
+        kv_b_after_decode[0]
     )
 
-    # The batched KV cache must be split back into
-    # request-local caches.
     assert first_key_a.shape[0] == 1
     assert first_value_a.shape[0] == 1
+
     assert first_key_b.shape[0] == 1
     assert first_value_b.shape[0] == 1
 
-    assert first_key_a.shape == first_key_b.shape
-    assert first_value_a.shape == first_value_b.shape
-
-    # Requests must not share the same tensor storage.
-    assert first_key_a.data_ptr() != (
-        first_key_b.data_ptr()
+    assert (
+        first_key_a.shape
+        == first_key_b.shape
     )
 
-    assert first_value_a.data_ptr() != (
-        first_value_b.data_ptr()
+    assert (
+        first_value_a.shape
+        == first_value_b.shape
     )
+
 
 @pytest.mark.integration
 def test_scheduler_real_request_finishes_by_length(
     real_runner: PyTorchModelRunner,
+    paged_kv_cache_qwen: PagedKVCache,
 ) -> None:
     block_manager = KVBlockManager(
         num_blocks=2,
         block_size=4,
     )
-    paged_kv_cache = PagedKVCache(
-        num_layers=1,
-        num_blocks=32,
-        num_kv_heads=1,
-        block_size=4,
-        head_dim=2,
-        dtype=torch.float32,
-        device="cpu",
+
+    prefix_cache = PrefixCache(
+        block_manager
     )
 
     scheduler = ContinuousScheduler(
@@ -299,7 +420,8 @@ def test_scheduler_real_request_finishes_by_length(
         max_prefill_batch_size=1,
         max_decode_batch_size=1,
         block_manager=block_manager,
-        paged_kv_cache=paged_kv_cache,
+        paged_kv_cache=paged_kv_cache_qwen,
+        prefix_cache=prefix_cache,
     )
 
     input_ids = (
@@ -318,23 +440,89 @@ def test_scheduler_real_request_finishes_by_length(
 
     scheduler.add_request(request)
 
+    # -------------------------
+    # Step 1: prefill
+    # -------------------------
     prefill_result = scheduler.step()
 
-    assert request.state == RequestState.DECODING
-    assert request.generated_tokens_count == 1
-    assert request.request_id in scheduler.active
-    assert request.past_key_values is not None
-    assert prefill_result.finished_request_ids == []
+    assert (
+        request.state
+        == RequestState.DECODING
+    )
 
+    assert (
+        request.generated_tokens_count
+        == 1
+    )
+
+    assert (
+        request.request_id
+        in scheduler.active
+    )
+
+    assert (
+        prefill_result.finished_request_ids
+        == []
+    )
+
+    # Validate paged-KV state after prefill.
+    kv_after_prefill = (
+        paged_kv_cache_qwen.materialize_request_kv(
+            block_table=request.block_table,
+            num_tokens=request.kv_tokens,
+        )
+    )
+
+    assert (
+        get_kv_sequence_length(
+            kv_after_prefill
+        )
+        == request.kv_tokens
+    )
+
+    # Debug/invariant information for the
+    # decode capacity issue.
+    print(
+        "before decode:",
+        {
+            "kv_tokens": request.kv_tokens,
+            "block_table": request.block_table,
+            "num_free_blocks":
+                block_manager.num_free_blocks,
+            "block_size":
+                block_manager.block_size,
+        },
+    )
+
+    # -------------------------
+    # Step 2: decode
+    # -------------------------
     decode_result = scheduler.step()
 
-    assert request.state == RequestState.FINISHED
-    assert request.finish_reason == "length"
-    assert request.generated_tokens_count == 2
+    assert (
+        request.state
+        == RequestState.FINISHED
+    )
 
-    assert request.request_id not in scheduler.active
-    assert request.request_id in scheduler.completed
-    assert request.past_key_values is None
+    assert (
+        request.finish_reason
+        == "length"
+    )
+
+    assert (
+        request.generated_tokens_count
+        == 2
+    )
+
+    assert (
+        request.request_id
+        not in scheduler.active
+    )
+
+    assert (
+        request.request_id
+        in scheduler.completed
+    )
 
     assert decode_result.decoded_request_ids == [
         "request-a"
@@ -344,32 +532,34 @@ def test_scheduler_real_request_finishes_by_length(
         "request-a"
     ]
 
-    assert scheduler.has_pending_work() is False
+    assert (
+        scheduler.has_pending_work()
+        is False
+    )
+
 
 @pytest.mark.integration
 def test_real_batched_decode_one_finishes_other_continues(
     real_runner: PyTorchModelRunner,
+    paged_kv_cache_qwen: PagedKVCache,
 ) -> None:
     block_manager = KVBlockManager(
         num_blocks=8,
         block_size=4,
     )
-    paged_kv_cache = PagedKVCache(
-        num_layers=1,
-        num_blocks=32,
-        num_kv_heads=1,
-        block_size=4,
-        head_dim=2,
-        dtype=torch.float32,
-        device="cpu",
+
+    prefix_cache = PrefixCache(
+        block_manager
     )
+
     scheduler = ContinuousScheduler(
         runner=real_runner,
         batch_builder=BatchBuilder(),
         max_prefill_batch_size=2,
         max_decode_batch_size=2,
         block_manager=block_manager,
-        paged_kv_cache=paged_kv_cache,
+        paged_kv_cache=paged_kv_cache_qwen,
+        prefix_cache=prefix_cache,
     )
 
     input_ids_a = (
@@ -388,7 +578,9 @@ def test_real_batched_decode_one_finishes_other_continues(
         .tolist()
     )
 
-    assert len(input_ids_a) == len(input_ids_b)
+    assert len(input_ids_a) == len(
+        input_ids_b
+    )
 
     request_a = Request(
         request_id="request-a",
@@ -405,26 +597,80 @@ def test_real_batched_decode_one_finishes_other_continues(
     scheduler.add_request(request_a)
     scheduler.add_request(request_b)
 
-    # Prefill produces token 1 for both.
+    # -------------------------
+    # Step 1: prefill
+    # -------------------------
     scheduler.step()
 
-    assert request_a.generated_tokens_count == 1
-    assert request_b.generated_tokens_count == 1
+    assert (
+        request_a.generated_tokens_count
+        == 1
+    )
 
-    # Decode produces token 2 for both.
-    # A reaches max_new_tokens, B continues.
+    assert (
+        request_b.generated_tokens_count
+        == 1
+    )
+
+    print(
+        "before batched decode:",
+        {
+            "A": {
+                "kv_tokens":
+                    request_a.kv_tokens,
+                "block_table":
+                    request_a.block_table,
+            },
+            "B": {
+                "kv_tokens":
+                    request_b.kv_tokens,
+                "block_table":
+                    request_b.block_table,
+            },
+            "num_free_blocks":
+                block_manager.num_free_blocks,
+        },
+    )
+
+    # -------------------------
+    # Step 2: batched decode
+    # -------------------------
     result = scheduler.step()
 
-    assert request_a.state == RequestState.FINISHED
-    assert request_a.finish_reason == "length"
-    assert request_a.past_key_values is None
-    assert request_a.request_id in scheduler.completed
-    assert request_a.request_id not in scheduler.active
+    assert (
+        request_a.state
+        == RequestState.FINISHED
+    )
 
-    assert request_b.state == RequestState.DECODING
-    assert request_b.past_key_values is not None
-    assert request_b.request_id in scheduler.active
-    assert request_b.request_id not in scheduler.completed
+    assert (
+        request_a.finish_reason
+        == "length"
+    )
+
+    assert (
+        request_a.request_id
+        in scheduler.completed
+    )
+
+    assert (
+        request_a.request_id
+        not in scheduler.active
+    )
+
+    assert (
+        request_b.state
+        == RequestState.DECODING
+    )
+
+    assert (
+        request_b.request_id
+        in scheduler.active
+    )
+
+    assert (
+        request_b.request_id
+        not in scheduler.completed
+    )
 
     assert result.decoded_request_ids == [
         "request-a",
@@ -435,11 +681,16 @@ def test_real_batched_decode_one_finishes_other_continues(
         "request-a"
     ]
 
-    # Next step should decode only B.
+    # -------------------------
+    # Step 3: decode B only
+    # -------------------------
     next_result = scheduler.step()
 
     assert next_result.decoded_request_ids == [
         "request-b"
     ]
 
-    assert request_b.generated_tokens_count == 3
+    assert (
+        request_b.generated_tokens_count
+        == 3
+    )

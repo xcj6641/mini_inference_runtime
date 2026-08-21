@@ -1,6 +1,8 @@
+import torch
 from app.runtime.request import Request
 
 from app.runtime.prefix_cache import PrefixCache
+from app.runtime.paged_kv_cache import PagedKVCache
 
 
 def test_prefix_cache_miss_returns_none(block_manager) -> None:
@@ -800,3 +802,406 @@ def test_select_prefill_uses_shorter_cached_prefix_when_longest_misses(
     #
     # 1 reused + 2 newly allocated.
     assert len(request_b.block_table) == 3
+
+# test write kv cache into paged kv cache with shared blocks
+def test_write_request_kv_prefix_cache_writes_only_suffix() -> None:
+    paged_kv_cache = PagedKVCache(
+        num_layers=1,
+        num_blocks=4,
+        num_kv_heads=1,
+        block_size=4,
+        head_dim=2,
+        dtype=torch.float32,
+        device="cpu",
+    )
+
+    block_table = [0, 1]
+
+    # Step 1:
+    # Pretend block 0 already contains the cached prefix
+    # for logical tokens 0..3.
+    prefix_key = torch.tensor(
+        [[[
+            [10.0, 10.0],
+            [11.0, 11.0],
+            [12.0, 12.0],
+            [13.0, 13.0],
+        ]]]
+    )
+
+    prefix_value = torch.tensor(
+        [[[
+            [110.0, 110.0],
+            [111.0, 111.0],
+            [112.0, 112.0],
+            [113.0, 113.0],
+        ]]]
+    )
+
+    paged_kv_cache.write_request_kv(
+        block_table=block_table,
+        past_key_values=(
+            (prefix_key, prefix_value),
+        ),
+        num_tokens=4,
+        source_start=0,
+    )
+
+    # Save the shared prefix block before suffix write.
+    prefix_key_before = (
+        paged_kv_cache.key_cache[
+            0,
+            0,
+        ].clone()
+    )
+
+    prefix_value_before = (
+        paged_kv_cache.value_cache[
+            0,
+            0,
+        ].clone()
+    )
+
+    # Step 2:
+    # Runner returns the full KV:
+    #
+    # logical tokens:
+    # 0   1   2   3   4    5
+    # 10  11  12  13  99   100
+    full_key = torch.tensor(
+        [[[
+            [10.0, 10.0],
+            [11.0, 11.0],
+            [12.0, 12.0],
+            [13.0, 13.0],
+            [99.0, 99.0],
+            [100.0, 100.0],
+        ]]]
+    )
+
+    full_value = torch.tensor(
+        [[[
+            [110.0, 110.0],
+            [111.0, 111.0],
+            [112.0, 112.0],
+            [113.0, 113.0],
+            [199.0, 199.0],
+            [200.0, 200.0],
+        ]]]
+    )
+
+    # Only write logical tokens 4 and 5.
+    paged_kv_cache.write_request_kv_prefix_cache(
+        block_table=block_table,
+        past_key_values=(
+            (full_key, full_value),
+        ),
+        num_tokens=2,
+        source_start=4,
+        destination_start=4,
+    )
+
+    # Step 3:
+    # Shared prefix block must not change.
+    torch.testing.assert_close(
+        paged_kv_cache.key_cache[
+            0,
+            0,
+        ],
+        prefix_key_before,
+    )
+
+    torch.testing.assert_close(
+        paged_kv_cache.value_cache[
+            0,
+            0,
+        ],
+        prefix_value_before,
+    )
+
+    # Step 4:
+    # Logical token 4 should be written to:
+    # block_table[1] = physical block 1, slot 0.
+    torch.testing.assert_close(
+        paged_kv_cache.key_cache[
+            0,
+            1,
+            :,
+            0,
+            :,
+        ],
+        torch.tensor(
+            [[99.0, 99.0]]
+        ),
+    )
+
+    torch.testing.assert_close(
+        paged_kv_cache.value_cache[
+            0,
+            1,
+            :,
+            0,
+            :,
+        ],
+        torch.tensor(
+            [[199.0, 199.0]]
+        ),
+    )
+
+    # Logical token 5 should go to slot 1.
+    torch.testing.assert_close(
+        paged_kv_cache.key_cache[
+            0,
+            1,
+            :,
+            1,
+            :,
+        ],
+        torch.tensor(
+            [[100.0, 100.0]]
+        ),
+    )
+
+    torch.testing.assert_close(
+        paged_kv_cache.value_cache[
+            0,
+            1,
+            :,
+            1,
+            :,
+        ],
+        torch.tensor(
+            [[200.0, 200.0]]
+        ),
+    )
+
+def test_write_request_kv_prefix_cache_with_padding() -> None:
+    paged_kv_cache = PagedKVCache(
+        num_layers=1,
+        num_blocks=4,
+        num_kv_heads=1,
+        block_size=4,
+        head_dim=2,
+        dtype=torch.float32,
+        device="cpu",
+    )
+
+    block_table = [0, 1]
+
+    # Existing cached prefix:
+    # logical tokens 0..3
+    prefix_key = torch.tensor(
+        [[[
+            [10.0, 10.0],
+            [11.0, 11.0],
+            [12.0, 12.0],
+            [13.0, 13.0],
+        ]]]
+    )
+
+    prefix_value = prefix_key + 100
+
+    paged_kv_cache.write_request_kv(
+        block_table=block_table,
+        past_key_values=(
+            (prefix_key, prefix_value),
+        ),
+        num_tokens=4,
+        source_start=0,
+    )
+
+    prefix_key_before = (
+        paged_kv_cache.key_cache[
+            0, 0
+        ].clone()
+    )
+
+    # Runner-produced physical KV:
+    #
+    # idx:
+    # 0    1    2   3   4   5   6   7
+    #
+    # PAD  PAD  10  11  12  13  99 100
+    full_key = torch.tensor(
+        [[[
+            [-1.0, -1.0],
+            [-2.0, -2.0],
+            [10.0, 10.0],
+            [11.0, 11.0],
+            [12.0, 12.0],
+            [13.0, 13.0],
+            [99.0, 99.0],
+            [100.0, 100.0],
+        ]]]
+    )
+
+    full_value = full_key + 100
+
+    paged_kv_cache.write_request_kv_prefix_cache(
+        block_table=block_table,
+        past_key_values=(
+            (full_key, full_value),
+        ),
+        num_tokens=2,
+
+        # Read physical indices 6 and 7.
+        source_start=6,
+
+        # Write logical indices 4 and 5.
+        destination_start=4,
+    )
+
+    # Cached prefix block must remain unchanged.
+    torch.testing.assert_close(
+        paged_kv_cache.key_cache[
+            0, 0
+        ],
+        prefix_key_before,
+    )
+
+    # Logical token 4 -> block 1, slot 0
+    torch.testing.assert_close(
+        paged_kv_cache.key_cache[
+            0,
+            1,
+            :,
+            0,
+            :,
+        ],
+        torch.tensor(
+            [[99.0, 99.0]]
+        ),
+    )
+
+    # Logical token 5 -> block 1, slot 1
+    torch.testing.assert_close(
+        paged_kv_cache.key_cache[
+            0,
+            1,
+            :,
+            1,
+            :,
+        ],
+        torch.tensor(
+            [[100.0, 100.0]]
+        ),
+    )
+
+    # PAD values must never appear in the
+    # logical suffix positions.
+    assert not torch.equal(
+        paged_kv_cache.key_cache[
+            0,
+            1,
+            :,
+            0,
+            :,
+        ],
+        torch.tensor(
+            [[-1.0, -1.0]]
+        ),
+    )
+
+def test_prefix_hit_prefill_does_not_overwrite_shared_prefix_block(
+    scheduler,
+    block_manager,
+    paged_kv_cache,
+    prefix_cache,
+) -> None:
+    # A has one full cacheable block plus a suffix.
+    request_a = make_request(
+        request_id="A",
+        input_ids=[10, 11, 12, 13, 14, 15],
+    )
+
+    scheduler.add_request(request_a)
+
+    # Prefill A and publish its prefix.
+    scheduler.step()
+
+    assert len(request_a.block_table) >= 2
+
+    shared_block_id = request_a.block_table[0]
+
+    prefix_cache.insert(
+        token_ids=[10, 11, 12, 13],
+        block_ids=[shared_block_id],
+    )
+
+    # Save the physical contents of the shared block.
+    shared_key_before = (
+        paged_kv_cache.key_cache[
+            :,
+            shared_block_id,
+        ].clone()
+    )
+
+    shared_value_before = (
+        paged_kv_cache.value_cache[
+            :,
+            shared_block_id,
+        ].clone()
+    )
+
+    # Verify the prefix is actually cached.
+    entry = prefix_cache.lookup(
+        [10, 11, 12, 13]
+    )
+
+    assert entry is not None
+
+    assert (
+        entry.block_ids[0]
+        == shared_block_id
+    )
+
+    # B shares A's first full block,
+    # but has a different suffix.
+    request_b = make_request(
+        request_id="B",
+        input_ids=[10, 11, 12, 13, 99, 100],
+    )
+
+    scheduler.add_request(request_b)
+
+    scheduler.step()
+
+    # B should reuse the same physical prefix block.
+    assert (
+        request_b.block_table[0]
+        == shared_block_id
+    )
+    cached_prefix_length = 4
+    suffix_input_ids = request_b.input_ids[
+        cached_prefix_length:
+    ]
+    assert suffix_input_ids == [
+        99,
+        100,
+    ]
+
+    # But the shared physical KV block must
+    # remain bit-for-bit unchanged.
+    torch.testing.assert_close(
+        paged_kv_cache.key_cache[
+            :,
+            shared_block_id,
+        ],
+        shared_key_before,
+    )
+
+    torch.testing.assert_close(
+        paged_kv_cache.value_cache[
+            :,
+            shared_block_id,
+        ],
+        shared_value_before,
+    )
+
+    # B should also have its own suffix block.
+    assert len(request_b.block_table) >= 2
+
+    assert (
+        request_b.block_table[1]
+        != shared_block_id
+    )

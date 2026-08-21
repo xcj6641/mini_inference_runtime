@@ -6,6 +6,7 @@ from app.runtime.request import Request, RequestState
 from app.runtime.scheduler_result import StepResult
 from app.runtime.kv_cache_utils import (
     split_legacy_kv_cache,
+    get_kv_sequence_length,
 )
 from app.runtime.paged_kv_cache import PagedKVCache
 from app.runtime.prefix_cache import PrefixCache, PrefixCacheEntry
@@ -130,13 +131,19 @@ class ContinuousScheduler:
         self,
     ) -> list[Request]:
         selected: list[Request] = []
+        remaining: deque[Request] = deque()
 
-        for request in self.waiting:
+        while self.waiting:
+            request = self.waiting.popleft()
+
+            # Batch is already full.
+            # Keep unselected requests in waiting.
             if (
                 len(selected)
                 >= self.max_prefill_batch_size
             ):
-                break
+                remaining.append(request)
+                continue
 
             entry = (
                 self.prefix_cache.lookup_longest_prefix(
@@ -174,6 +181,9 @@ class ContinuousScheduler:
                         entry=entry,
                     )
 
+                # Could not admit this request.
+                # Put it back into waiting.
+                remaining.append(request)
                 continue
 
             self.block_manager.ensure_capacity(
@@ -183,10 +193,14 @@ class ContinuousScheduler:
                 ),
             )
 
+            # Successfully admitted.
+            # Do NOT put it back into waiting.
             selected.append(request)
 
+        self.waiting = remaining
+
         return selected
-        
+   
     # Select requests whose total kv block requirements do not exceed available blocks.
     # def _select_prefill_requests(
     #     self,
@@ -291,6 +305,11 @@ class ContinuousScheduler:
 
         if not requests:
             return [], {}
+
+        cached_prefix_lengths = {
+            request.request_id: request.kv_tokens
+            for request in requests
+        }
         
         batch = self.batch_builder.build_prefill_batch(
             requests,
@@ -322,25 +341,96 @@ class ContinuousScheduler:
         generated_token_ids: dict[str, int] = {}
 
         for index, request in enumerate(requests):
+            cached_prefix_length = (
+                cached_prefix_lengths[
+                    request.request_id
+                ]
+            )
+
+            per_request_cache = per_request_caches[index]
+
+            prompt_length = len(
+                request.input_ids
+            )
+
+            physical_kv_length = (
+                per_request_cache[0][0].shape[2]
+            )
+
+            # Where the real prompt begins inside the
+            # runner-produced KV tensor.
+            #
+            # This accounts for prefill padding.
+            logical_prompt_start = (
+                physical_kv_length
+                - prompt_length
+            )
+            if cached_prefix_length == 0:
+                # Cache miss:
+                # write the whole prompt KV.
+                self.paged_kv_cache.write_request_kv(
+                    block_table=request.block_table,
+                    past_key_values=per_request_cache,
+                    num_tokens=prompt_length,
+                    source_start=logical_prompt_start,
+                )
+
+            else:
+                # Cache hit:
+                # shared prefix already exists in paged KV.
+                # Only write the uncached suffix.
+                suffix_input_ids = request.input_ids[
+                    cached_prefix_length:
+                ]
+
+                cached_past_key_values = (
+                    self.paged_kv_cache.materialize_request_kv(
+                        block_table=request.block_table,
+                        num_tokens=cached_prefix_length,
+                    )
+                )
+                assert len(suffix_input_ids) == (
+                    len(request.input_ids)
+                    - cached_prefix_length
+                )
+
+                assert (
+                    get_kv_sequence_length(
+                        cached_past_key_values
+                    )
+                    == cached_prefix_length
+                )
+
+                uncached_tokens = (
+                    prompt_length
+                    - cached_prefix_length
+                )
+
+                source_start = (
+                    logical_prompt_start
+                    + cached_prefix_length
+                )
+
+                destination_start = (
+                    cached_prefix_length
+                )
+
+                self.paged_kv_cache.write_request_kv_prefix_cache(
+                    block_table=request.block_table,
+                    past_key_values=per_request_cache,
+                    num_tokens=uncached_tokens,
+                    source_start=source_start,
+                    destination_start=destination_start,
+                )
+
+            # After prefill, the complete prompt KV is valid.
+            # do not call before reading cached_prefix_lengths
+            request.set_kv_tokens_from_prompt()
+
 
             request.set_kv_tokens_from_prompt()
             next_token_id = int(
                 output.next_token_ids[index]
-            )
-
-            per_request_cache = per_request_caches[index]
-            # # Temporay old path.
-            # request.attach_kv_cache(
-            #     per_request_cache
-            # )
-            # New paged path.
-            physical_kv_length = per_request_cache[0][0].shape[2]
-            source_start = physical_kv_length - request.kv_tokens
-            self.paged_kv_cache.write_request_kv(
-                block_table=request.block_table,
-                past_key_values=per_request_cache,
-                num_tokens=request.kv_tokens,
-                source_start=source_start,
             )
 
             request.append_generated_token(

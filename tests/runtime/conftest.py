@@ -47,6 +47,24 @@ def paged_kv_cache() -> PagedKVCache:
     )
 
 @pytest.fixture
+def paged_kv_cache_qwen(
+        real_runner: PyTorchModelRunner,
+)->PagedKVCache:
+    
+    config = real_runner.model.config
+    return PagedKVCache(
+        num_layers=config.num_hidden_layers,
+        num_blocks=32,
+        num_kv_heads=config.num_key_value_heads,
+        block_size=4,
+        head_dim=(
+            config.hidden_size // config.num_attention_heads
+        ),
+        dtype=real_runner.dtype,
+        device=real_runner.device,
+    )
+
+@pytest.fixture
 def prefix_cache(
     block_manager: KVBlockManager
 ) -> PrefixCache:
@@ -59,7 +77,7 @@ def scheduler(
     real_runner,
     batch_builder,
     block_manager: KVBlockManager,
-    paged_kv_cache: PagedKVCache,
+    paged_kv_cache_qwen: PagedKVCache,
     prefix_cache : PrefixCache,
 ) -> ContinuousScheduler:
     
@@ -69,6 +87,6 @@ def scheduler(
         block_manager=block_manager,
         max_prefill_batch_size=4,
         max_decode_batch_size=4,
-        paged_kv_cache=paged_kv_cache,
+        paged_kv_cache=paged_kv_cache_qwen,
         prefix_cache=prefix_cache,
     )

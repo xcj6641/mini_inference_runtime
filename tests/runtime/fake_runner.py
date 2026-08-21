@@ -3,6 +3,7 @@ from app.runtime.request import Request
 from app.runtime.types import BatchedPrefillOutput, BatchedDecodeOutput
 from app.runtime.kv_cache_utils import get_kv_sequence_length
 from app.runtime.batch import DecodeBatch, PrefillBatch
+from app.runtime.batch_builder import BatchBuilder
 
 class FakeRunner:
     def __init__(
@@ -154,7 +155,7 @@ class FakeRunner:
                 next_token_id = 9999
             else:
                 next_token_id = (
-                    2000 + decode_count
+                    2001 + decode_count
                 )
 
             next_token_ids.append(
@@ -181,17 +182,21 @@ class FakeRunner:
             ),
         )
 
+
+
 class FakeBatchBuilder:
     def __init__(self) -> None:
         self.prefill_calls: list[list[str]] = []
         self.decode_calls: list[list[str]] = []
+
+        self._real_builder = BatchBuilder()
 
     def build_prefill_batch(
         self,
         requests: list[Request],
         pad_token_id: int | None,
         device: torch.device | None,
-    ) -> list[Request]:
+    ):
         self.prefill_calls.append(
             [
                 request.request_id
@@ -199,13 +204,18 @@ class FakeBatchBuilder:
             ]
         )
 
-        return requests
+        return self._real_builder.build_prefill_batch(
+            requests=requests,
+            pad_token_id=pad_token_id,
+            device=device,
+        )
 
-    def build_equal_length_decode_batch(
+    def build_decode_batch(
         self,
         requests: list[Request],
+        per_request_caches,
         device: torch.device | None,
-    ) -> list[Request]:
+    ):
         self.decode_calls.append(
             [
                 request.request_id
@@ -213,5 +223,9 @@ class FakeBatchBuilder:
             ]
         )
 
-        return requests
+        return self._real_builder.build_decode_batch(
+            requests=requests,
+            per_request_caches=per_request_caches,
+            device=device,
+        )
 
