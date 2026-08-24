@@ -65,6 +65,28 @@ def paged_kv_cache_qwen(
     )
 
 @pytest.fixture
+def make_paged_kv_cache_qwen(
+    real_runner,
+):
+    def _make():
+        config = real_runner.model.config
+
+        return PagedKVCache(
+            num_layers=config.num_hidden_layers,
+            num_blocks=32,
+            num_kv_heads=config.num_key_value_heads,
+            block_size=4,
+            head_dim=(
+                config.hidden_size
+                // config.num_attention_heads
+            ),
+            dtype=real_runner.dtype,
+            device=real_runner.device,
+        )
+
+    return _make
+
+@pytest.fixture
 def prefix_cache(
     block_manager: KVBlockManager
 ) -> PrefixCache:

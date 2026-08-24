@@ -31,7 +31,7 @@ class KVBlockManager:
         )
 
         # physical block ID -> request ID
-        self._owners: dict[int, str] = {}
+        # self._owners: dict[int, str] = {}
 
         self._ref_counts: dict[int, int] = {}
 
@@ -41,7 +41,7 @@ class KVBlockManager:
 
     @property
     def num_allocated_blocks(self) -> int:
-        return len(self._owners)
+        return len(self._ref_counts)
 
     @property
     def utilization(self) -> float:
@@ -115,36 +115,20 @@ class KVBlockManager:
 
         for _ in range(num_blocks):
             block_id = self._free_blocks.popleft()
-            self._ref_counts[block_id] = 1
 
-            if block_id in self._owners:
+            if block_id in self._ref_counts:
                 raise RuntimeError(
-                    f"Free block {block_id} already has an owner"
+                    f"Free block {block_id} already has a refcount"
                 )
 
-            self._owners[block_id] = (
-                request.request_id
-            )
-
+            self._ref_counts[block_id] = 1
             allocated.append(block_id)
 
-        request.block_table.extend(allocated)
+        request.block_table.extend(
+            allocated
+        )
 
         return allocated
-    
-    def owner_of(
-        self,
-        block_id: int,
-    ) -> str | None:
-        if (
-            block_id < 0
-            or block_id >= self.num_blocks
-        ):
-            raise ValueError(
-                f"Invalid block ID: {block_id}"
-            )
-
-        return self._owners.get(block_id)
 
     def retain_blocks(
         self,
@@ -168,7 +152,9 @@ class KVBlockManager:
                     f"block {block_id} is not allocated"
                 )
 
-            ref_count = self._ref_counts[block_id]
+            ref_count = self._ref_counts[
+                block_id
+            ]
 
             if ref_count <= 0:
                 raise RuntimeError(
@@ -178,11 +164,19 @@ class KVBlockManager:
             ref_count -= 1
 
             if ref_count == 0:
-                del self._ref_counts[block_id]
-                self._free_blocks.append(block_id)
-            else:
-                self._ref_counts[block_id] = ref_count
+                del self._ref_counts[
+                    block_id
+                ]
 
+                self._free_blocks.append(
+                    block_id
+                )
+
+            else:
+                self._ref_counts[
+                    block_id
+                ] = ref_count
+ 
     def ensure_capacity(
         self,
         request: Request,
@@ -228,38 +222,22 @@ class KVBlockManager:
     def get_ref_count(self, block_id: int) -> int:
         return self._ref_counts.get(block_id, 0)
 
-    def free(
-        self,
-        request: Request,
-    ) -> list[int]:
-        if not request.block_table:
-            return []
+    # def free(
+    #     self,
+    #     request: Request,
+    # ) -> list[int]:
+    #     if not request.block_table:
+    #         return []
 
-        block_ids = list(
-            request.block_table
-        )
+    #     block_ids = list(
+    #         request.block_table
+    #     )
 
-        for block_id in block_ids:
-            owner = self._owners.get(block_id)
+    #     self.release_blocks(block_ids=block_ids)
 
-            if owner is None:
-                raise RuntimeError(
-                    f"Block {block_id} has no owner"
-                )
+    #     request.block_table.clear()
 
-            if owner != request.request_id:
-                raise RuntimeError(
-                    f"Block {block_id} is owned by "
-                    f"{owner}, not {request.request_id}"
-                )
-
-        for block_id in block_ids:
-            del self._owners[block_id]
-            self._free_blocks.append(block_id)
-
-        request.block_table.clear()
-
-        return block_ids
+    #     return block_ids
 
     def ensure_batch_capacity(
         self,

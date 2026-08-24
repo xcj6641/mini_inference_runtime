@@ -1,5 +1,6 @@
 # app/runtime/continuous_scheduler.py
 
+import torch
 from collections import deque
 
 from app.runtime.request import Request, RequestState
@@ -90,6 +91,9 @@ class ContinuousScheduler:
             f"Unknown request ID: {request_id}"
         )
 
+    ##########################################
+    #                 Prefill                #
+    ##########################################
     def _try_attach_longest_cached_prefix(
         self,
         request: Request,
@@ -106,7 +110,6 @@ class ContinuousScheduler:
         self.block_manager.retain_blocks(
             entry.block_ids
         )
-
 
     def _detach_cached_prefix(
         self,
@@ -126,6 +129,23 @@ class ContinuousScheduler:
             entry.token_ids
         )
 
+    def _split_prefill_requests_by_cache_hit(
+        self,
+        requests: list[Request],
+    ) -> tuple[list[Request], list[Request]]:
+        cache_misses: list[Request] = []
+        cache_hits: list[Request] = []
+
+        for request in requests:
+            if request.kv_tokens > 0:
+                cache_hits.append(request)
+            else:
+                cache_misses.append(request)
+
+        return (
+            cache_misses,
+            cache_hits,
+        )
 
     def _select_prefill_requests(
         self,
@@ -201,57 +221,6 @@ class ContinuousScheduler:
 
         return selected
    
-    # Select requests whose total kv block requirements do not exceed available blocks.
-    # def _select_prefill_requests(
-    #     self,
-    # ) -> list[Request]:
-    #     selected: list[Request] = []
-    #     remaining = deque()
-
-    #     available_blocks = (
-    #         self.block_manager.num_free_blocks
-    #     )
-
-    #     required_blocks = 0
-
-    #     while self.waiting:
-    #         request = self.waiting.popleft()
-
-    #         if (
-    #             len(selected)
-    #             >= self.max_prefill_batch_size
-    #         ):
-    #             remaining.append(request)
-    #             continue
-
-    #         additional_blocks = (
-    #             self.block_manager
-    #             .additional_blocks_required(
-    #                 request,
-    #                 self._prefill_token_requirement(
-    #                     request
-    #                 ),
-    #             )
-    #         )
-
-    #         if (
-    #             required_blocks
-    #             + additional_blocks
-    #             > available_blocks
-    #         ):
-    #             remaining.append(request)
-    #             continue
-
-    #         selected.append(request)
-
-    #         required_blocks += (
-    #             additional_blocks
-    #         )
-
-    #     self.waiting = remaining
-
-    #     return selected
-
     def _prefill_token_requirement(
         self,
         request: Request,
@@ -298,7 +267,292 @@ class ContinuousScheduler:
 
         return request.kv_tokens
 
+    def _run_full_prefill_batch(
+        self,
+        requests: list[Request],
+    ) -> tuple[list[str], dict[str, int]]:
+        if not requests:
+            return [], {}
+
+        for request in requests:
+            assert request.kv_tokens == 0
+
+        batch = self.batch_builder.build_prefill_batch(
+            requests,
+            pad_token_id=self.runner.pad_token_id,
+            device=self.runner.device,
+        )
+
+        output = self.runner.prefill_batch(
+            batch
+        )
+
+        if (
+            len(output.next_token_ids)
+            != len(requests)
+        ):
+            raise RuntimeError(
+                "Prefill output token count does not "
+                "match request count"
+            )
+
+        per_request_caches = (
+            split_legacy_kv_cache(
+                output.past_key_values
+            )
+        )
+
+        if (
+            len(per_request_caches)
+            != len(requests)
+        ):
+            raise RuntimeError(
+                "Split prefill KV-cache count does not "
+                "match request count"
+            )
+
+        prefetched_request_ids: list[str] = []
+        generated_token_ids: dict[str, int] = {}
+
+        for index, request in enumerate(requests):
+            per_request_cache = (
+                per_request_caches[index]
+            )
+
+            prompt_length = len(
+                request.input_ids
+            )
+
+            physical_kv_length = (
+                per_request_cache[0][0].shape[2]
+            )
+
+            # Account for left padding in
+            # batched prefill output.
+            logical_prompt_start = (
+                physical_kv_length
+                - prompt_length
+            )
+
+            self.paged_kv_cache.write_request_kv(
+                block_table=request.block_table,
+                past_key_values=per_request_cache,
+                num_tokens=prompt_length,
+                source_start=logical_prompt_start,
+            )
+
+            # Entire prompt KV is now valid.
+            request.set_kv_tokens_from_prompt()
+
+            # Publish all full-block prefixes.
+            self._maybe_cache_prefilled_prefix(
+                request
+            )
+
+            next_token_id = int(
+                output.next_token_ids[index]
+            )
+
+            request.append_generated_token(
+                next_token_id
+            )
+
+            request.state = (
+                RequestState.DECODING
+            )
+
+            self._update_finish_state(
+                request=request,
+                generated_token_id=next_token_id,
+            )
+
+            prefetched_request_ids.append(
+                request.request_id
+            )
+
+            generated_token_ids[
+                request.request_id
+            ] = next_token_id
+
+            if (
+                request.state
+                == RequestState.DECODING
+            ):
+                self.active[
+                    request.request_id
+                ] = request
+            else:
+                self._complete_request(
+                    request
+                )
+
+        return (
+            prefetched_request_ids,
+            generated_token_ids,
+        )
+    
     def _run_prefill(
+        self,
+        requests: list[Request],
+    ) -> tuple[list[str], dict[str, int]]:
+        if not requests:
+            return [], {}
+
+        cache_misses, cache_hits = (
+            self._split_prefill_requests_by_cache_hit(
+                requests
+            )
+        )
+
+        prefetched_request_ids: list[str] = []
+        generated_token_ids: dict[str, int] = {}
+
+        if cache_misses:
+            (
+                miss_request_ids,
+                miss_generated_tokens,
+            ) = self._run_full_prefill_batch(
+                cache_misses
+            )
+
+            prefetched_request_ids.extend(
+                miss_request_ids
+            )
+
+            generated_token_ids.update(
+                miss_generated_tokens
+            )
+
+        for request in cache_hits:
+            (
+                hit_request_ids,
+                hit_generated_tokens,
+            ) = self._run_prefill_with_cached_prefix(
+                request=request,
+                cached_prefix_length=request.kv_tokens,
+            )
+
+            prefetched_request_ids.extend(
+                hit_request_ids
+            )
+
+            generated_token_ids.update(
+                hit_generated_tokens
+            )
+
+        return (
+            prefetched_request_ids,
+            generated_token_ids,
+        )
+
+    def _run_prefill_with_cached_prefix(
+        self,
+        *,
+        request: Request,
+        cached_prefix_length: int,
+    ) -> tuple[list[str], dict[str, int]]:
+        suffix_input_ids = request.input_ids[
+            cached_prefix_length:
+        ]
+
+        if not suffix_input_ids:
+            raise RuntimeError(
+                "cached prefix covers the entire prompt"
+            )
+
+        cached_past_key_values = (
+            self.paged_kv_cache.materialize_request_kv(
+                block_table=request.block_table,
+                num_tokens=cached_prefix_length,
+            )
+        )
+
+        suffix_input_ids_tensor = torch.tensor(
+            [suffix_input_ids],
+            dtype=torch.long,
+            device=self.runner.device,
+        )
+
+        suffix_length = len(
+            suffix_input_ids
+        )
+
+        position_ids = torch.arange(
+            cached_prefix_length,
+            cached_prefix_length + suffix_length,
+            dtype=torch.long,
+            device=self.runner.device,
+        ).unsqueeze(0)
+
+        attention_mask = torch.ones(
+            (
+                1,
+                cached_prefix_length
+                + suffix_length,
+            ),
+            dtype=torch.long,
+            device=self.runner.device,
+        )
+
+        (
+            next_token_id,
+            updated_kv,
+        ) = self.runner.prefill_with_past(
+            input_ids=suffix_input_ids_tensor,
+            past_key_values=cached_past_key_values,
+            attention_mask=attention_mask,
+            position_ids=position_ids,
+        )
+
+        assert (
+            get_kv_sequence_length(updated_kv)
+            == len(request.input_ids)
+        )
+
+        # Write only newly computed suffix KV.
+        self.paged_kv_cache.write_request_kv_prefix_cache(
+            block_table=request.block_table,
+            past_key_values=updated_kv,
+            num_tokens=suffix_length,
+            source_start=cached_prefix_length,
+            destination_start=cached_prefix_length,
+        )
+
+        # Complete prompt KV is now valid.
+        request.set_kv_tokens_from_prompt()
+
+        self._maybe_cache_prefilled_prefix(
+            request
+        )
+
+        request.append_generated_token(
+            next_token_id
+        )
+
+        request.state = RequestState.DECODING
+
+        self._update_finish_state(
+            request=request,
+            generated_token_id=next_token_id,
+        )
+
+        if request.state == RequestState.DECODING:
+            self.active[
+                request.request_id
+            ] = request
+        else:
+            self._complete_request(
+                request
+            )
+
+        return (
+            [request.request_id],
+            {
+                request.request_id: next_token_id
+            },
+        )
+
+    def _run_prefill_old(
         self,
         requests: list[Request],
     ) -> tuple[list[str], dict[str, int]]:
@@ -310,7 +564,27 @@ class ContinuousScheduler:
             request.request_id: request.kv_tokens
             for request in requests
         }
-        
+
+        # NEW:
+        # First real compute-saving path.
+        # Support one cache-hit request at a time
+        if len(requests) == 1:
+            request = requests[0]
+
+            cached_prefix_length = (
+                cached_prefix_lengths[
+                    request.request_id
+                ]
+            )
+
+            if cached_prefix_length > 0:
+                return self._run_prefill_with_cached_prefix(
+                    request=request,
+                    cached_prefix_length=(
+                        cached_prefix_length
+                    ),
+                )
+
         batch = self.batch_builder.build_prefill_batch(
             requests,
             pad_token_id=self.runner.pad_token_id,
@@ -319,16 +593,8 @@ class ContinuousScheduler:
 
         output = self.runner.prefill_batch(batch)
 
-        if len(output.next_token_ids) != len(requests):
-            raise RuntimeError(
-                "Prefill output token count does not "
-                "match request count"
-            )
-
-        per_request_caches = (
-            split_legacy_kv_cache(
-                output.past_key_values
-            )
+        per_request_caches = split_legacy_kv_cache(
+            output.past_key_values
         )
 
         if len(per_request_caches) != len(requests):
@@ -374,7 +640,6 @@ class ContinuousScheduler:
                     num_tokens=prompt_length,
                     source_start=logical_prompt_start,
                 )
-
             else:
                 # Cache hit:
                 # shared prefix already exists in paged KV.
@@ -427,8 +692,10 @@ class ContinuousScheduler:
             # do not call before reading cached_prefix_lengths
             request.set_kv_tokens_from_prompt()
 
+            self._maybe_cache_prefilled_prefix(
+                request
+            )
 
-            request.set_kv_tokens_from_prompt()
             next_token_id = int(
                 output.next_token_ids[index]
             )
@@ -464,6 +731,10 @@ class ContinuousScheduler:
             generated_token_ids,
         )
 
+
+    ##########################################
+    #                 Decode                 #
+    ##########################################
     def _decode_token_requirement(
         self,
         request: Request,
@@ -634,11 +905,15 @@ class ContinuousScheduler:
             None,
         )
 
-        self.block_manager.free(request)
+        self.block_manager.release_blocks(
+            request.block_table
+        )
 
-        # request.kv_tokens = 0
+        request.block_table.clear()
 
-        self.completed[request.request_id] = request
+        self.completed[
+            request.request_id
+        ] = request
 
     def step(self) -> StepResult:
         self.tick_id += 1
@@ -760,3 +1035,86 @@ class ContinuousScheduler:
         ):
             request.state = RequestState.FINISHED
             request.finish_reason = "length"
+
+    ##########################################
+    #             Prefix Cache               #
+    ##########################################
+    def _maybe_cache_prefilled_prefix(
+        self,
+        request: Request,
+    ) -> None:
+        block_size = self.block_manager.block_size
+
+        num_full_blocks = (
+            len(request.input_ids)
+            // block_size
+        )
+
+        for num_blocks in range(
+            1,
+            num_full_blocks + 1,
+        ):
+            prefix_length = (
+                num_blocks * block_size
+            )
+
+            prefix_tokens = request.input_ids[
+                :prefix_length
+            ]
+
+            existing = self.prefix_cache.lookup(
+                prefix_tokens
+            )
+
+            if existing is not None:
+                continue
+
+            prefix_blocks = request.block_table[
+                :num_blocks
+            ]
+
+            self.prefix_cache.insert(
+                token_ids=prefix_tokens,
+                block_ids=prefix_blocks,
+            )
+
+    def _maybe_cache_longest_prefilled_prefix(
+        self,
+        request: Request,
+    ) -> None:
+        prompt_length = len(request.input_ids)
+
+        cacheable_tokens = (
+            prompt_length
+            // self.block_manager.block_size
+        ) * self.block_manager.block_size
+
+        if cacheable_tokens == 0:
+            return
+
+        prefix_tokens = request.input_ids[
+            :cacheable_tokens
+        ]
+
+        # Avoid retaining the same blocks twice.
+        existing = self.prefix_cache.lookup(
+            prefix_tokens
+        )
+
+        if existing is not None:
+            return
+
+        num_cacheable_blocks = (
+            cacheable_tokens
+            // self.block_manager.block_size
+        )
+
+        prefix_blocks = request.block_table[
+            :num_cacheable_blocks
+        ]
+
+        self.prefix_cache.insert(
+            token_ids=prefix_tokens,
+            block_ids=prefix_blocks,
+        )
+

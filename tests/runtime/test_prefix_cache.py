@@ -1,8 +1,11 @@
 import torch
-from app.runtime.request import Request
+from app.runtime.request import Request, RequestState
 
 from app.runtime.prefix_cache import PrefixCache
 from app.runtime.paged_kv_cache import PagedKVCache
+from app.runtime.kv_block_manager import KVBlockManager
+from app.runtime.continuous_scheduler import ContinuousScheduler
+from app.runtime.batch_builder import BatchBuilder
 
 
 def test_prefix_cache_miss_returns_none(block_manager) -> None:
@@ -250,7 +253,7 @@ def test_final_release_returns_block_to_free_list(
     )
 
 # test evicts
-def test_evicts_blocks_when_capacity_exceeded(block_manager)-> None:
+def test_cache_eviction_releases_final_block_reference(block_manager)-> None:
         initial_free_blocks = len(block_manager._free_blocks)
         request = make_request(
             request_id="A",
@@ -641,50 +644,60 @@ def test_select_prefill_request_uses_cached_prefix_blocks(
     block_manager,
     prefix_cache,
 ) -> None:
-    # A owns a full cached prefix block.
     request_a = make_request(
         request_id="A",
         input_ids=[10, 11, 12, 13],
     )
 
-    block_manager.ensure_capacity(
-        request=request_a,
-        total_tokens=4,
+    # Let scheduler create the KV and
+    # automatically publish the prefix.
+    scheduler.add_request(request_a)
+    scheduler.step()
+
+    shared_block = (
+        request_a.block_table[0]
     )
 
-    shared_block = request_a.block_table[0]
-
-    prefix_cache.insert(
-        token_ids=[10, 11, 12, 13],
-        block_ids=[shared_block],
+    entry = prefix_cache.lookup(
+        [10, 11, 12, 13]
     )
 
-    # B needs 6 tokens total:
-    # 4 cached + 2 uncached.
+    assert entry is not None
+
+    assert entry.block_ids == (
+        shared_block,
+    )
+
     request_b = make_request(
         request_id="B",
-        input_ids=[10, 11, 12, 13, 99, 100],
+        input_ids=[
+            10, 11, 12, 13,
+            99, 100,
+        ],
     )
 
     scheduler.add_request(request_b)
 
-    selected = scheduler._select_prefill_requests()
+    selected = (
+        scheduler._select_prefill_requests()
+    )
 
     assert request_b in selected
 
-    assert request_b.block_table[0] == shared_block
+    assert (
+        request_b.block_table[0]
+        == shared_block
+    )
 
     assert request_b.kv_tokens == 4
 
-    # One shared block + one private suffix block.
-    assert len(request_b.block_table) == 2
+    assert len(
+        request_b.block_table
+    ) == 2
 
-    assert request_b.block_table[1] != shared_block
-
-    # A + cache + B
     assert (
-        block_manager.get_ref_count(shared_block)
-        == 3
+        request_b.block_table[1]
+        != shared_block
     )
 
 def test_select_prefill_rolls_back_cached_prefix_when_no_capacity(
@@ -697,16 +710,18 @@ def test_select_prefill_rolls_back_cached_prefix_when_no_capacity(
         input_ids=[10, 11, 12, 13],
     )
 
-    block_manager.ensure_capacity(
-        request=request_a,
-        total_tokens=4,
-    )
+    scheduler.add_request(request_a)
+    scheduler.step()
 
     shared_block = request_a.block_table[0]
 
-    prefix_cache.insert(
-        token_ids=[10, 11, 12, 13],
-        block_ids=[shared_block],
+    entry = prefix_cache.lookup(
+        [10, 11, 12, 13]
+    )
+
+    assert entry is not None
+    assert entry.block_ids == (
+        shared_block,
     )
 
     initial_ref_count = (
@@ -761,16 +776,18 @@ def test_select_prefill_uses_shorter_cached_prefix_when_longest_misses(
         input_ids=[10, 11, 12, 13],
     )
 
-    block_manager.ensure_capacity(
-        request=request_a,
-        total_tokens=4,
-    )
+    scheduler.add_request(request_a)
+    scheduler.step()
 
     shared_block = request_a.block_table[0]
 
-    prefix_cache.insert(
-        token_ids=[10, 11, 12, 13],
-        block_ids=[shared_block],
+    entry = prefix_cache.lookup(
+        [10, 11, 12, 13]
+    )
+
+    assert entry is not None
+    assert entry.block_ids == (
+        shared_block,
     )
 
     request_b = make_request(
@@ -1123,9 +1140,14 @@ def test_prefix_hit_prefill_does_not_overwrite_shared_prefix_block(
 
     shared_block_id = request_a.block_table[0]
 
-    prefix_cache.insert(
-        token_ids=[10, 11, 12, 13],
-        block_ids=[shared_block_id],
+    entry = prefix_cache.lookup(
+    [10, 11, 12, 13]
+)
+
+    assert entry is not None
+
+    assert entry.block_ids == (
+        shared_block_id,
     )
 
     # Save the physical contents of the shared block.
@@ -1205,3 +1227,1243 @@ def test_prefix_hit_prefill_does_not_overwrite_shared_prefix_block(
         request_b.block_table[1]
         != shared_block_id
     )
+
+# runner implement prefill_with_past()
+import pytest
+import torch
+
+from app.runtime.kv_cache_utils import (
+    get_kv_sequence_length,
+)
+from app.runtime.pytorch_model_runner import (
+    PyTorchModelRunner,
+)
+
+
+@pytest.mark.integration
+def test_prefill_with_past_matches_full_prefill(
+    real_runner: PyTorchModelRunner,
+) -> None:
+    # -------------------------
+    # Build a real token sequence
+    # -------------------------
+    full_input_ids = (
+        real_runner.encode_prompt(
+            "The capital of France is Paris"
+        )
+        .squeeze(0)
+    )
+
+    assert full_input_ids.ndim == 1
+    assert full_input_ids.shape[0] >= 2
+
+    # Split into:
+    #
+    # prefix + suffix
+    #
+    # Keep at least one token in suffix.
+    prefix_length = (
+        full_input_ids.shape[0] - 1
+    )
+
+    # [batch_size, sequence_length]
+    prefix_input_ids = (
+        full_input_ids[:prefix_length]
+        .unsqueeze(0)
+        .to(real_runner.device)
+    )
+
+    suffix_input_ids = (
+        full_input_ids[prefix_length:]
+        .unsqueeze(0)
+        .to(real_runner.device)
+    )
+
+    full_input_ids_batch = (
+        full_input_ids
+        .unsqueeze(0)
+        .to(real_runner.device)
+    )
+
+    full_length = (
+        full_input_ids_batch.shape[1]
+    )
+
+    suffix_length = (
+        suffix_input_ids.shape[1]
+    )
+
+    assert (
+        prefix_length + suffix_length
+        == full_length
+    )
+
+    # ==================================================
+    # Path A:
+    # Full prefill in one model call
+    # ==================================================
+    full_attention_mask = torch.ones(
+        (
+            1,
+            full_length,
+        ),
+        dtype=torch.long,
+        device=real_runner.device,
+    )
+
+    full_position_ids = torch.arange(
+        full_length,
+        dtype=torch.long,
+        device=real_runner.device,
+    ).unsqueeze(0)
+
+    with torch.no_grad():
+        full_output = real_runner.model(
+            input_ids=full_input_ids_batch,
+            attention_mask=full_attention_mask,
+            position_ids=full_position_ids,
+            use_cache=True,
+        )
+
+    full_next_token_id = int(
+        torch.argmax(
+            full_output.logits[:, -1, :],
+            dim=-1,
+        ).item()
+    )
+
+    full_kv = full_output.past_key_values
+
+    assert (
+        get_kv_sequence_length(full_kv)
+        == full_length
+    )
+
+    # ==================================================
+    # Path B, Step 1:
+    # Prefill only the prefix
+    # ==================================================
+    prefix_attention_mask = torch.ones(
+        (
+            1,
+            prefix_length,
+        ),
+        dtype=torch.long,
+        device=real_runner.device,
+    )
+
+    prefix_position_ids = torch.arange(
+        prefix_length,
+        dtype=torch.long,
+        device=real_runner.device,
+    ).unsqueeze(0)
+
+    with torch.no_grad():
+        prefix_output = real_runner.model(
+            input_ids=prefix_input_ids,
+            attention_mask=prefix_attention_mask,
+            position_ids=prefix_position_ids,
+            use_cache=True,
+        )
+
+    cached_past_key_values = (
+        prefix_output.past_key_values
+    )
+
+    assert (
+        get_kv_sequence_length(
+            cached_past_key_values
+        )
+        == prefix_length
+    )
+
+    # ==================================================
+    # Path B, Step 2:
+    # Run only the suffix using cached prefix KV
+    # ==================================================
+    suffix_attention_mask = torch.ones(
+        (
+            1,
+            prefix_length + suffix_length,
+        ),
+        dtype=torch.long,
+        device=real_runner.device,
+    )
+
+    suffix_position_ids = torch.arange(
+        prefix_length,
+        prefix_length + suffix_length,
+        dtype=torch.long,
+        device=real_runner.device,
+    ).unsqueeze(0)
+
+    (
+        cached_path_next_token_id,
+        updated_kv,
+    ) = real_runner.prefill_with_past(
+        input_ids=suffix_input_ids,
+        past_key_values=(
+            cached_past_key_values
+        ),
+        attention_mask=(
+            suffix_attention_mask
+        ),
+        position_ids=(
+            suffix_position_ids
+        ),
+    )
+
+    # ==================================================
+    # Assertions
+    # ==================================================
+
+    # Both execution paths should predict
+    # the same next token.
+    assert (
+        cached_path_next_token_id
+        == full_next_token_id
+    )
+
+    # Prefix KV + suffix should produce
+    # the same final logical KV length.
+    assert (
+        get_kv_sequence_length(
+            updated_kv
+        )
+        == full_length
+    )
+
+    # Same number of layers.
+    assert (
+        len(updated_kv)
+        == len(full_kv)
+    )
+
+    # Same shapes for every K/V layer.
+    for (
+        full_layer,
+        cached_layer,
+    ) in zip(
+        full_kv,
+        updated_kv,
+    ):
+        full_key, full_value = (
+            full_layer
+        )
+
+        cached_key, cached_value = (
+            cached_layer
+        )
+
+        assert (
+            full_key.shape
+            == cached_key.shape
+        )
+
+        assert (
+            full_value.shape
+            == cached_value.shape
+        )
+
+@pytest.mark.integration
+def test_scheduler_cached_prefix_matches_full_prefill(
+    real_runner,
+    make_paged_kv_cache_qwen,
+) -> None:
+    # ==================================================
+    # Path A: baseline full prefill
+    # ==================================================
+    baseline_block_manager = KVBlockManager(
+        num_blocks=8,
+        block_size=4,
+    )
+
+    baseline_prefix_cache = PrefixCache(
+        baseline_block_manager
+    )
+
+    baseline_paged_kv_cache = (
+        make_paged_kv_cache_qwen()
+    )
+
+    baseline_scheduler = ContinuousScheduler(
+        runner=real_runner,
+        batch_builder=BatchBuilder(),
+        max_prefill_batch_size=1,
+        max_decode_batch_size=1,
+        block_manager=baseline_block_manager,
+        paged_kv_cache=baseline_paged_kv_cache,
+        prefix_cache=baseline_prefix_cache,
+    )
+
+    input_ids = (
+        real_runner.encode_prompt(
+            "The capital of France is Paris"
+        )
+        .squeeze(0)
+        .tolist()
+    )
+
+    baseline_request = Request(
+        request_id="baseline",
+        input_ids=input_ids,
+        max_new_tokens=2,
+    )
+
+    baseline_scheduler.add_request(
+        baseline_request
+    )
+
+    baseline_scheduler.step()
+
+    baseline_first_token = (
+        baseline_request.generated_ids[0]
+    )
+
+    # ==================================================
+    # Path B: prefix-cache execution
+    # ==================================================
+    block_manager = KVBlockManager(
+        num_blocks=8,
+        block_size=4,
+    )
+
+    prefix_cache = PrefixCache(
+        block_manager
+    )
+
+    paged_kv_cache = (
+        make_paged_kv_cache_qwen()
+    )
+
+    scheduler = ContinuousScheduler(
+        runner=real_runner,
+        batch_builder=BatchBuilder(),
+        max_prefill_batch_size=1,
+        max_decode_batch_size=1,
+        block_manager=block_manager,
+        paged_kv_cache=paged_kv_cache,
+        prefix_cache=prefix_cache,
+    )
+
+    # Exactly one full cacheable block.
+    prefix_ids = input_ids[:4]
+
+    prefix_request = Request(
+        request_id="prefix",
+        input_ids=prefix_ids,
+        max_new_tokens=2,
+    )
+
+    scheduler.add_request(
+        prefix_request
+    )
+
+    scheduler.step()
+
+    shared_prefix_block = (
+        prefix_request.block_table[0]
+    )
+
+    # Scheduler should automatically publish
+    # the full-block prefix.
+    entry = prefix_cache.lookup(
+        prefix_ids
+    )
+
+    assert entry is not None
+
+    assert entry.block_ids == (
+        shared_prefix_block,
+    )
+
+    # Save shared block contents before reuse.
+    shared_key_before = (
+        paged_kv_cache.key_cache[
+            :,
+            shared_prefix_block,
+        ].clone()
+    )
+
+    shared_value_before = (
+        paged_kv_cache.value_cache[
+            :,
+            shared_prefix_block,
+        ].clone()
+    )
+
+    cached_request = Request(
+        request_id="cached",
+        input_ids=input_ids,
+        max_new_tokens=2,
+    )
+
+    scheduler.add_request(
+        cached_request
+    )
+
+    scheduler.step()
+
+    # ==================================================
+    # Assertions
+    # ==================================================
+
+    # Functional equivalence:
+    # cached path predicts the same first token
+    # as normal full prefill.
+    assert (
+        cached_request.generated_ids[0]
+        == baseline_first_token
+    )
+
+    # Full prompt KV should now be valid.
+    assert (
+        cached_request.kv_tokens
+        == len(cached_request.input_ids)
+    )
+
+    # Cached request really reused the same
+    # physical prefix block.
+    assert (
+        cached_request.block_table[0]
+        == shared_prefix_block
+    )
+
+    # Shared prefix KV must remain immutable.
+    torch.testing.assert_close(
+        paged_kv_cache.key_cache[
+            :,
+            shared_prefix_block,
+        ],
+        shared_key_before,
+    )
+
+    torch.testing.assert_close(
+        paged_kv_cache.value_cache[
+            :,
+            shared_prefix_block,
+        ],
+        shared_value_before,
+    )
+
+def test_cache_hit_extends_prefix_cache_with_new_full_block(
+    scheduler,
+    block_manager,
+    paged_kv_cache,
+    prefix_cache,
+) -> None:
+    # Step 1:
+    # Seed one full cached block.
+    request_a = make_request(
+        request_id="A",
+        input_ids=[1, 2, 3, 4],
+    )
+
+    scheduler.add_request(request_a)
+    scheduler.step()
+
+    shared_block = request_a.block_table[0]
+
+    # If automatic insertion is already implemented,
+    # this should already exist.
+    entry_4 = prefix_cache.lookup(
+        [1, 2, 3, 4]
+    )
+
+    assert entry_4 is not None
+    assert entry_4.block_ids == (
+        shared_block,
+    )
+
+    # Step 2:
+    # New request hits the 4-token prefix,
+    # then computes five more tokens.
+    request_b = make_request(
+        request_id="B",
+        input_ids=[
+            1, 2, 3, 4,
+            5, 6, 7, 8,
+            9,
+        ],
+    )
+
+    scheduler.add_request(request_b)
+    scheduler.step()
+
+    # It should reuse the existing first block.
+    assert (
+        request_b.block_table[0]
+        == shared_block
+    )
+
+    # 9 tokens with block_size=4:
+    # [0] tokens 1..4
+    # [1] tokens 5..8
+    # [2] token 9
+    assert len(request_b.block_table) == 3
+
+    second_block = request_b.block_table[1]
+
+    # Step 3:
+    # The newly completed 8-token prefix
+    # should now be published.
+    entry_8 = prefix_cache.lookup(
+        [1, 2, 3, 4, 5, 6, 7, 8]
+    )
+
+    assert entry_8 is not None
+
+    assert entry_8.block_ids == (
+        shared_block,
+        second_block,
+    )
+
+    # The partial 9-token prefix should NOT
+    # be cached.
+    entry_9 = prefix_cache.lookup(
+        [1, 2, 3, 4, 5, 6, 7, 8, 9]
+    )
+
+    assert entry_9 is None
+
+# test overlapping prefix entries and reference counts.
+def test_overlapping_prefix_entries_keep_shared_block_alive(
+    block_manager,
+) -> None:
+    request = make_request(
+        request_id="A",
+        input_ids=[
+            1, 2, 3, 4,
+            5, 6, 7, 8,
+        ],
+    )
+
+    block_manager.ensure_capacity(
+        request=request,
+        total_tokens=8,
+    )
+
+    assert len(request.block_table) == 2
+
+    block_0 = request.block_table[0]
+    block_1 = request.block_table[1]
+
+    prefix_cache = PrefixCache(
+        block_manager
+    )
+
+    # Request owns both blocks:
+    #
+    # block_0 ref = 1
+    # block_1 ref = 1
+    assert (
+        block_manager.get_ref_count(block_0)
+        == 1
+    )
+
+    assert (
+        block_manager.get_ref_count(block_1)
+        == 1
+    )
+
+    # Cache the 4-token prefix.
+    prefix_cache.insert(
+        token_ids=[1, 2, 3, 4],
+        block_ids=[block_0],
+    )
+
+    # block_0:
+    # request + 4-token cache entry
+    assert (
+        block_manager.get_ref_count(block_0)
+        == 2
+    )
+
+    assert (
+        block_manager.get_ref_count(block_1)
+        == 1
+    )
+
+    # Cache the 8-token prefix.
+    prefix_cache.insert(
+        token_ids=[
+            1, 2, 3, 4,
+            5, 6, 7, 8,
+        ],
+        block_ids=[
+            block_0,
+            block_1,
+        ],
+    )
+
+    # block_0:
+    # request
+    # + 4-token entry
+    # + 8-token entry
+    #
+    # ref = 3
+    assert (
+        block_manager.get_ref_count(block_0)
+        == 3
+    )
+
+    # block_1:
+    # request
+    # + 8-token entry
+    #
+    # ref = 2
+    assert (
+        block_manager.get_ref_count(block_1)
+        == 2
+    )
+
+    # Request finishes.
+    block_manager.release_blocks(
+        request.block_table
+    )
+
+    # Only cache references remain.
+    assert (
+        block_manager.get_ref_count(block_0)
+        == 2
+    )
+
+    assert (
+        block_manager.get_ref_count(block_1)
+        == 1
+    )
+
+    # Evict shorter prefix first.
+    prefix_cache.evict(
+        token_ids=[1, 2, 3, 4]
+    )
+
+    # block_0 must NOT be freed because
+    # the 8-token entry still references it.
+    assert (
+        block_manager.get_ref_count(block_0)
+        == 1
+    )
+
+    assert (
+        block_0
+        not in block_manager._free_blocks
+    )
+
+    # block_1 is still referenced by
+    # the 8-token entry too.
+    assert (
+        block_manager.get_ref_count(block_1)
+        == 1
+    )
+
+    assert (
+        block_1
+        not in block_manager._free_blocks
+    )
+
+    # Now evict the 8-token prefix.
+    prefix_cache.evict(
+        token_ids=[
+            1, 2, 3, 4,
+            5, 6, 7, 8,
+        ]
+    )
+
+    # All references are gone.
+    assert (
+        block_manager.get_ref_count(block_0)
+        == 0
+    )
+
+    assert (
+        block_manager.get_ref_count(block_1)
+        == 0
+    )
+
+    assert (
+        block_0
+        in block_manager._free_blocks
+    )
+
+    assert (
+        block_1
+        in block_manager._free_blocks
+    )
+
+def test_scheduler_created_overlapping_prefixes_have_correct_ref_counts(
+    scheduler,
+    block_manager,
+    prefix_cache,
+) -> None:
+    # Step 1:
+    # Request A creates the first cached prefix:
+    #
+    # [1,2,3,4] -> [block_0]
+    request_a = make_request(
+        request_id="A",
+        input_ids=[1, 2, 3, 4],
+        max_new_tokens=4,
+    )
+
+    scheduler.add_request(request_a)
+    scheduler.step()
+
+    entry_4 = prefix_cache.lookup(
+        [1, 2, 3, 4]
+    )
+
+    assert entry_4 is not None
+
+    block_0 = entry_4.block_ids[0]
+
+    # Step 2:
+    # Request B hits the 4-token prefix and extends it:
+    #
+    # [1,2,3,4,5,6,7,8,9]
+    #
+    # After prefill:
+    #
+    # [1..4] -> [block_0]
+    # [1..8] -> [block_0, block_1]
+    request_b = make_request(
+        request_id="B",
+        input_ids=[
+            1, 2, 3, 4,
+            5, 6, 7, 8,
+            9,
+        ],
+        max_new_tokens=4,
+    )
+
+    scheduler.add_request(request_b)
+    scheduler.step()
+
+    entry_8 = prefix_cache.lookup(
+        [
+            1, 2, 3, 4,
+            5, 6, 7, 8,
+        ]
+    )
+
+    assert entry_8 is not None
+
+    assert entry_8.block_ids[0] == block_0
+    assert len(entry_8.block_ids) == 2
+
+    block_1 = entry_8.block_ids[1]
+
+    # Both cache entries reference block_0.
+    #
+    # We don't assert an exact refcount yet,
+    # because A/B may still hold request references
+    # depending on scheduler lifecycle.
+    ref_count_block_0_before = (
+        block_manager.get_ref_count(
+            block_0
+        )
+    )
+
+    ref_count_block_1_before = (
+        block_manager.get_ref_count(
+            block_1
+        )
+    )
+
+    assert ref_count_block_0_before >= 2
+    assert ref_count_block_1_before >= 1
+
+    # Step 3:
+    # Evict only the shorter prefix.
+    prefix_cache.evict(
+        token_ids=[1, 2, 3, 4]
+    )
+
+    # block_0 must still be alive because
+    # the 8-token entry still references it.
+    assert (
+        block_manager.get_ref_count(
+            block_0
+        )
+        == ref_count_block_0_before - 1
+    )
+
+    assert (
+        block_0
+        not in block_manager._free_blocks
+    )
+
+    # block_1 was not referenced by the
+    # 4-token entry, so its refcount should
+    # not change.
+    assert (
+        block_manager.get_ref_count(
+            block_1
+        )
+        == ref_count_block_1_before
+    )
+
+    # Step 4:
+    # Evict the longer prefix too.
+    prefix_cache.evict(
+        token_ids=[
+            1, 2, 3, 4,
+            5, 6, 7, 8,
+        ]
+    )
+
+    # Each block loses exactly one more
+    # cache-held reference.
+    assert (
+        block_manager.get_ref_count(
+            block_0
+        )
+        == ref_count_block_0_before - 2
+    )
+
+    assert (
+        block_manager.get_ref_count(
+            block_1
+        )
+        == ref_count_block_1_before - 1
+    )
+
+def test_finished_request_releases_own_reference_but_cache_keeps_block_alive(
+    scheduler,
+    block_manager,
+    prefix_cache,
+) -> None:
+    request = make_request(
+        request_id="A",
+        input_ids=[1, 2, 3, 4],
+        max_new_tokens=2,
+    )
+
+    scheduler.add_request(request)
+
+    # Step 1:
+    # A is selected for prefill.
+    # Prefill generates token #1.
+    prefill_result = scheduler.step()
+
+    assert request.generated_tokens_count == 1
+    assert request.state == RequestState.DECODING
+
+    entry = prefix_cache.lookup(
+        [1, 2, 3, 4]
+    )
+
+    assert entry is not None
+    assert len(entry.block_ids) == 1
+
+    cached_block = entry.block_ids[0]
+
+    # At this point:
+    # request + PrefixCache both own the block.
+    assert (
+        block_manager.get_ref_count(
+            cached_block
+        )
+        == 2
+    )
+
+    assert (
+        cached_block
+        not in block_manager._free_blocks
+    )
+
+    # Step 2:
+    # A is now selected for decode.
+    # Decode generates token #2 and A reaches
+    # max_new_tokens.
+    decode_result = scheduler.step()
+
+    assert request.generated_tokens_count == 2
+    assert request.state == RequestState.FINISHED
+    assert request.finish_reason == "length"
+
+    assert (
+        request.request_id
+        in scheduler.completed
+    )
+
+    assert (
+        request.request_id
+        not in scheduler.active
+    )
+
+    # Request-owned reference should be gone.
+    # PrefixCache still owns the cached block.
+    assert (
+        block_manager.get_ref_count(
+            cached_block
+        )
+        == 1
+    )
+
+    assert (
+        cached_block
+        not in block_manager._free_blocks
+    )
+
+    # Finally remove the cache's reference.
+    prefix_cache.evict(
+        token_ids=[1, 2, 3, 4]
+    )
+
+    assert (
+        block_manager.get_ref_count(
+            cached_block
+        )
+        == 0
+    )
+
+    assert (
+        cached_block
+        in block_manager._free_blocks
+    )
+
+def test_new_request_reuses_prefix_after_original_request_finishes(
+    scheduler,
+    block_manager,
+    prefix_cache,
+) -> None:
+    # ----------------------------------
+    # Step 1:
+    # A creates a cacheable prefix.
+    # ----------------------------------
+    request_a = make_request(
+        request_id="A",
+        input_ids=[1, 2, 3, 4],
+        max_new_tokens=2,
+    )
+
+    scheduler.add_request(request_a)
+
+    # Step 1:
+    # prefill A, generate token #1
+    scheduler.step()
+
+    entry = prefix_cache.lookup(
+        [1, 2, 3, 4]
+    )
+
+    assert entry is not None
+
+    cached_block = entry.block_ids[0]
+
+    # A + PrefixCache
+    assert (
+        block_manager.get_ref_count(
+            cached_block
+        )
+        == 2
+    )
+
+    # ----------------------------------
+    # Step 2:
+    # Decode A once.
+    # max_new_tokens=2, so A finishes.
+    # ----------------------------------
+    scheduler.step()
+
+    assert (
+        request_a.state
+        == RequestState.FINISHED
+    )
+
+    # A released its reference.
+    # PrefixCache still owns the block.
+    assert (
+        block_manager.get_ref_count(
+            cached_block
+        )
+        == 1
+    )
+
+    assert (
+        cached_block
+        not in block_manager._free_blocks
+    )
+
+    # PrefixCache entry must still exist.
+    entry_after_a_finishes = (
+        prefix_cache.lookup(
+            [1, 2, 3, 4]
+        )
+    )
+
+    assert (
+        entry_after_a_finishes
+        is not None
+    )
+
+    assert (
+        entry_after_a_finishes.block_ids
+        == (cached_block,)
+    )
+
+    # ----------------------------------
+    # Step 3:
+    # B arrives after A has finished.
+    # ----------------------------------
+    request_b = make_request(
+        request_id="B",
+        input_ids=[
+            1, 2, 3, 4,
+            9, 10,
+        ],
+        max_new_tokens=4,
+    )
+
+    scheduler.add_request(request_b)
+
+    # Only select prefill first so we can inspect
+    # the attachment before execution.
+    selected = (
+        scheduler._select_prefill_requests()
+    )
+
+    assert request_b in selected
+
+    # B should reuse A's old cached block.
+    assert (
+        request_b.block_table[0]
+        == cached_block
+    )
+
+    assert request_b.kv_tokens == 4
+
+    # PrefixCache + B
+    assert (
+        block_manager.get_ref_count(
+            cached_block
+        )
+        == 2
+    )
+
+    # B also needs a private suffix block.
+    assert len(request_b.block_table) == 2
+
+    assert (
+        request_b.block_table[1]
+        != cached_block
+    )
+
+# test batch prefill 
+def test_split_prefill_requests_by_cache_hit(
+    scheduler,
+) -> None:
+    request_a = make_request(
+        request_id="A",
+        input_ids=[1, 2, 3, 4],
+    )
+
+    request_b = make_request(
+        request_id="B",
+        input_ids=[1, 2, 3, 4, 5, 6],
+    )
+
+    request_c = make_request(
+        request_id="C",
+        input_ids=[9, 10, 11],
+    )
+
+    # Simulate that B already attached
+    # a 4-token cached prefix.
+    request_b.kv_tokens = 4
+
+    cache_misses, cache_hits = (
+        scheduler._split_prefill_requests_by_cache_hit(
+            [
+                request_a,
+                request_b,
+                request_c,
+            ]
+        )
+    )
+
+    assert cache_misses == [
+        request_a,
+        request_c,
+    ]
+
+    assert cache_hits == [
+        request_b,
+    ]
+
+def test_mixed_prefill_batch_handles_cache_miss_and_hit(
+    scheduler,
+    fake_runner,
+) -> None:
+    # Seed the prefix cache first.
+    cached_request = make_request(
+        request_id="cached-source",
+        input_ids=[10, 11, 12, 13],
+    )
+
+    scheduler.add_request(cached_request)
+
+    scheduler.step()
+
+    # Finish/release the original request while keeping
+    # the prefix cache entry alive.
+    while (
+        cached_request.state
+        != RequestState.FINISHED
+    ):
+        scheduler.step()
+
+    # A is a full cache miss.
+    request_a = make_request(
+        request_id="A",
+        input_ids=[50, 51, 52, 53],
+    )
+
+    # B shares the cached prefix and has a new suffix.
+    request_b = make_request(
+        request_id="B",
+        input_ids=[10, 11, 12, 13, 99],
+    )
+
+    scheduler.add_request(request_a)
+    scheduler.add_request(request_b)
+
+    result = scheduler.step()
+
+    assert request_a.request_id in (
+        result.prefetched_request_ids
+    )
+    assert request_b.request_id in (
+        result.prefetched_request_ids
+    )
+
+    assert request_a.state == RequestState.DECODING
+    assert request_b.state == RequestState.DECODING
+
+    # A had no reusable KV before prefill.
+    # Its entire prompt should now be represented.
+    assert request_a.kv_tokens == len(
+        request_a.input_ids
+    )
+
+    # B should also end up with KV for its entire prompt:
+    #
+    # cached:
+    # [10, 11, 12, 13]
+    #
+    # suffix:
+    # [99]
+    assert request_b.kv_tokens == len(
+        request_b.input_ids
+    )
+
+    assert (
+        request_a.request_id
+        in result.generated_token_ids
+    )
+    assert (
+        request_b.request_id
+        in result.generated_token_ids
+    )
+
+def test_multiple_cache_misses_remain_batched(
+    scheduler,
+    fake_runner,
+) -> None:
+    request_a = make_request(
+        request_id="A",
+        input_ids=[10, 11, 12],
+    )
+
+    request_b = make_request(
+        request_id="B",
+        input_ids=[20, 21, 22],
+    )
+
+    scheduler.add_request(request_a)
+    scheduler.add_request(request_b)
+
+    result = scheduler.step()
+
+    assert request_a.state == RequestState.DECODING
+    assert request_b.state == RequestState.DECODING
+
+    assert request_a.request_id in (
+        result.prefetched_request_ids
+    )
+    assert request_b.request_id in (
+        result.prefetched_request_ids
+    )
+
+    assert request_a.request_id in (
+        result.generated_token_ids
+    )
+    assert request_b.request_id in (
+        result.generated_token_ids
+    )
+
+def test_mixed_prefill_handles_one_miss_and_multiple_hits(
+    scheduler,
+    fake_runner,
+) -> None:
+    # Seed reusable prefix.
+    source = make_request(
+        request_id="source",
+        input_ids=[10, 11, 12, 13],
+    )
+
+    scheduler.add_request(source)
+    scheduler.step()
+
+    while source.state != RequestState.FINISHED:
+        scheduler.step()
+
+    request_a = make_request(
+        request_id="A",
+        input_ids=[50, 51, 52],
+    )
+
+    request_b = make_request(
+        request_id="B",
+        input_ids=[10, 11, 12, 13, 99],
+    )
+
+    request_c = make_request(
+        request_id="C",
+        input_ids=[10, 11, 12, 13, 100],
+    )
+
+    scheduler.add_request(request_a)
+    scheduler.add_request(request_b)
+    scheduler.add_request(request_c)
+
+    result = scheduler.step()
+
+    assert request_a.state == RequestState.DECODING
+    assert request_b.state == RequestState.DECODING
+    assert request_c.state == RequestState.DECODING
+
+    assert request_a.request_id in (
+        result.prefetched_request_ids
+    )
+    assert request_b.request_id in (
+        result.prefetched_request_ids
+    )
+    assert request_c.request_id in (
+        result.prefetched_request_ids
+    )
+
+    assert request_a.request_id in (
+        result.generated_token_ids
+    )
+    assert request_b.request_id in (
+        result.generated_token_ids
+    )
+    assert request_c.request_id in (
+        result.generated_token_ids
+    )
+
+    assert request_a.kv_tokens == 3
+    assert request_b.kv_tokens == 5
+    assert request_c.kv_tokens == 5

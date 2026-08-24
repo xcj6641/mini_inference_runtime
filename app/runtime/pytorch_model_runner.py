@@ -401,3 +401,127 @@ class PyTorchModelRunner(ModelRunner):
                 "decode requires past_key_values returned by prefill "
                 "or a previous decode step"
             )
+        
+
+    def prefill_with_past(
+        self,
+        *,
+        input_ids: torch.Tensor,
+        past_key_values,
+        attention_mask: torch.Tensor,
+        position_ids: torch.Tensor,
+    ) -> tuple[int, tuple]:
+        """
+        Run suffix-only prefill using an existing KV cache.
+
+        Expected shapes:
+            input_ids:
+                [1, suffix_length]
+
+            attention_mask:
+                [1, cached_prefix_length + suffix_length]
+
+            position_ids:
+                [1, suffix_length]
+
+            past_key_values:
+                per-layer KV cache with sequence length
+                == cached_prefix_length
+        """
+
+        if input_ids.ndim != 2:
+            raise ValueError(
+                "input_ids must have shape [batch_size, seq_len]"
+            )
+
+        if input_ids.shape[0] != 1:
+            raise ValueError(
+                "prefill_with_past currently supports batch size 1 only"
+            )
+
+        if input_ids.shape[1] <= 0:
+            raise ValueError(
+                "suffix input_ids must contain at least one token"
+            )
+
+        if attention_mask.ndim != 2:
+            raise ValueError(
+                "attention_mask must have shape [batch_size, total_seq_len]"
+            )
+
+        if attention_mask.shape[0] != 1:
+            raise ValueError(
+                "attention_mask batch size must be 1"
+            )
+
+        if position_ids.ndim != 2:
+            raise ValueError(
+                "position_ids must have shape [batch_size, suffix_len]"
+            )
+
+        if position_ids.shape != input_ids.shape:
+            raise ValueError(
+                "position_ids shape must match input_ids shape"
+            )
+
+        if past_key_values is None:
+            raise ValueError(
+                "past_key_values must not be None"
+            )
+
+        cached_kv_length = (
+            past_key_values[0][0].shape[2]
+        )
+
+        suffix_length = input_ids.shape[1]
+
+        expected_attention_length = (
+            cached_kv_length
+            + suffix_length
+        )
+
+        if (
+            attention_mask.shape[1]
+            != expected_attention_length
+        ):
+            raise ValueError(
+                "attention_mask length must equal "
+                "cached KV length + suffix length"
+            )
+
+        input_ids = input_ids.to(
+            device=self.device,
+            dtype=torch.long,
+        )
+
+        attention_mask = attention_mask.to(
+            device=self.device,
+        )
+
+        position_ids = position_ids.to(
+            device=self.device,
+            dtype=torch.long,
+        )
+
+        with torch.no_grad():
+            output = self.model(
+                input_ids=input_ids,
+                past_key_values=past_key_values,
+                attention_mask=attention_mask,
+                position_ids=position_ids,
+                use_cache=True,
+            )
+
+        next_token_ids = torch.argmax(
+            output.logits[:, -1, :],
+            dim=-1,
+        )
+
+        next_token_id = int(
+            next_token_ids.item()
+        )
+
+        return (
+            next_token_id,
+            output.past_key_values,
+        )

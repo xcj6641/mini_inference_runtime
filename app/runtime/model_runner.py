@@ -44,3 +44,14 @@ class ModelRunner(ABC):
         batch: DecodeBatch,
     ) -> BatchedDecodeOutput:
         ...
+
+    @abstractmethod
+    def prefill_with_past(
+        self,
+        *,
+        input_ids: torch.Tensor,
+        past_key_values,
+        attention_mask: torch.Tensor,
+        position_ids: torch.Tensor,
+    ):
+        ...
