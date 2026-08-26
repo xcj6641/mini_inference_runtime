@@ -22,6 +22,16 @@ def real_runner() -> PyTorchModelRunner:
 def fake_runner() -> FakeRunner:
     return FakeRunner()
 
+@pytest.fixture
+def fake_runner_all_dim(
+    paged_kv_cache: PagedKVCache,
+) -> FakeRunner:
+    return FakeRunner(
+        num_layers=paged_kv_cache.num_layers,
+        num_kv_heads=paged_kv_cache.num_kv_heads,
+        head_dim=paged_kv_cache.head_dim,
+    )
+
 
 @pytest.fixture
 def block_manager() -> KVBlockManager:
@@ -110,5 +120,24 @@ def scheduler(
         max_prefill_batch_size=4,
         max_decode_batch_size=4,
         paged_kv_cache=paged_kv_cache_qwen,
+        prefix_cache=prefix_cache,
+    )
+
+@pytest.fixture
+def scheduler_fake_runner(
+    fake_runner_all_dim,
+    batch_builder,
+    block_manager: KVBlockManager,
+    paged_kv_cache: PagedKVCache,
+    prefix_cache : PrefixCache,
+) -> ContinuousScheduler:
+    
+    return ContinuousScheduler(
+        runner=fake_runner_all_dim,
+        batch_builder=batch_builder,
+        block_manager=block_manager,
+        max_prefill_batch_size=4,
+        max_decode_batch_size=4,
+        paged_kv_cache=paged_kv_cache,
         prefix_cache=prefix_cache,
     )

@@ -53,5 +53,6 @@ class ModelRunner(ABC):
         past_key_values,
         attention_mask: torch.Tensor,
         position_ids: torch.Tensor,
+        suffix_lengths: list[int] | None = None,
     ):
         ...

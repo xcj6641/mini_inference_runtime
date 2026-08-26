@@ -1420,7 +1420,7 @@ def test_prefill_with_past_matches_full_prefill(
     # Both execution paths should predict
     # the same next token.
     assert (
-        cached_path_next_token_id
+        cached_path_next_token_id[0]
         == full_next_token_id
     )
 
@@ -2252,8 +2252,8 @@ def test_new_request_reuses_prefix_after_original_request_finishes(
 
 # test batch prefill 
 def test_split_prefill_requests_by_cache_hit(
-    scheduler,
-) -> None:
+        scheduler,
+    ) -> None:
     request_a = make_request(
         request_id="A",
         input_ids=[1, 2, 3, 4],
@@ -2293,9 +2293,9 @@ def test_split_prefill_requests_by_cache_hit(
     ]
 
 def test_mixed_prefill_batch_handles_cache_miss_and_hit(
-    scheduler,
-    fake_runner,
-) -> None:
+        scheduler,
+        fake_runner_all_dim,
+    ) -> None:
     # Seed the prefix cache first.
     cached_request = make_request(
         request_id="cached-source",
@@ -2368,9 +2368,9 @@ def test_mixed_prefill_batch_handles_cache_miss_and_hit(
     )
 
 def test_multiple_cache_misses_remain_batched(
-    scheduler,
-    fake_runner,
-) -> None:
+        scheduler,
+        fake_runner_all_dim,
+    ) -> None:
     request_a = make_request(
         request_id="A",
         input_ids=[10, 11, 12],
@@ -2404,20 +2404,20 @@ def test_multiple_cache_misses_remain_batched(
     )
 
 def test_mixed_prefill_handles_one_miss_and_multiple_hits(
-    scheduler,
-    fake_runner,
-) -> None:
+        scheduler_fake_runner,
+        fake_runner_all_dim,
+    ) -> None:
     # Seed reusable prefix.
     source = make_request(
         request_id="source",
         input_ids=[10, 11, 12, 13],
     )
 
-    scheduler.add_request(source)
-    scheduler.step()
+    scheduler_fake_runner.add_request(source)
+    scheduler_fake_runner.step()
 
     while source.state != RequestState.FINISHED:
-        scheduler.step()
+        scheduler_fake_runner.step()
 
     request_a = make_request(
         request_id="A",
@@ -2434,11 +2434,11 @@ def test_mixed_prefill_handles_one_miss_and_multiple_hits(
         input_ids=[10, 11, 12, 13, 100],
     )
 
-    scheduler.add_request(request_a)
-    scheduler.add_request(request_b)
-    scheduler.add_request(request_c)
+    scheduler_fake_runner.add_request(request_a)
+    scheduler_fake_runner.add_request(request_b)
+    scheduler_fake_runner.add_request(request_c)
 
-    result = scheduler.step()
+    result = scheduler_fake_runner.step()
 
     assert request_a.state == RequestState.DECODING
     assert request_b.state == RequestState.DECODING
@@ -2467,3 +2467,172 @@ def test_mixed_prefill_handles_one_miss_and_multiple_hits(
     assert request_a.kv_tokens == 3
     assert request_b.kv_tokens == 5
     assert request_c.kv_tokens == 5
+
+def test_two_equal_length_cache_hits_use_one_batched_prefill_with_past(
+        scheduler_fake_runner,
+        fake_runner_all_dim,
+    ) -> None:
+    assert scheduler_fake_runner.runner is fake_runner_all_dim
+    
+    source = make_request(
+        request_id="source",
+        input_ids=[10, 11, 12, 13],
+    )
+
+    scheduler_fake_runner.add_request(source)
+
+    scheduler_fake_runner.step()
+
+    while source.state != RequestState.FINISHED:
+        scheduler_fake_runner.step()
+
+    # Ignore calls made while creating the
+    # prefix-cache entry.
+    fake_runner_all_dim.prefill_with_past_batch_sizes.clear()
+
+    request_b = make_request(
+        request_id="B",
+        input_ids=[
+            10,
+            11,
+            12,
+            13,
+            99,
+        ],
+    )
+
+    request_c = make_request(
+        request_id="C",
+        input_ids=[
+            10,
+            11,
+            12,
+            13,
+            100,
+        ],
+    )
+
+    scheduler_fake_runner.add_request(request_b)
+    scheduler_fake_runner.add_request(request_c)
+
+    result = scheduler_fake_runner.step()
+
+    assert request_b.request_id in (
+        result.prefetched_request_ids
+    )
+
+    assert request_c.request_id in (
+        result.prefetched_request_ids
+    )
+
+    assert request_b.state == RequestState.DECODING
+    assert request_c.state == RequestState.DECODING
+
+    assert request_b.kv_tokens == 5
+    assert request_c.kv_tokens == 5
+
+    # Current implementation:
+    #
+    # B -> prefill_with_past(batch_size=1)
+    # C -> prefill_with_past(batch_size=1)
+    #
+    # Therefore there are two runner calls.
+    assert (
+        fake_runner_all_dim.prefill_with_past_batch_sizes
+        == [2]
+    )
+
+def test_cached_prefill_batches_variable_suffix_lengths(
+    scheduler_fake_runner,
+    fake_runner_all_dim,
+) -> None:
+    scheduler = scheduler_fake_runner
+
+    assert scheduler.runner is fake_runner_all_dim
+
+    # Seed reusable prefix:
+    # [10, 11, 12, 13]
+    source = make_request(
+        request_id="source",
+        input_ids=[10, 11, 12, 13],
+    )
+
+    scheduler.add_request(source)
+    scheduler.step()
+
+    while source.state != RequestState.FINISHED:
+        scheduler.step()
+
+    fake_runner_all_dim.prefill_with_past_batch_sizes.clear()
+
+    # B:
+    # cached prefix length = 4
+    # suffix length = 1
+    request_b = make_request(
+        request_id="B",
+        input_ids=[
+            10,
+            11,
+            12,
+            13,
+            99,
+        ],
+    )
+
+    # C:
+    # cached prefix length = 4
+    # suffix length = 3
+    request_c = make_request(
+        request_id="C",
+        input_ids=[
+            10,
+            11,
+            12,
+            13,
+            100,
+            101,
+            102,
+        ],
+    )
+
+    scheduler.add_request(request_b)
+    scheduler.add_request(request_c)
+
+    result = scheduler.step()
+
+    # Both requests should be handled
+    # during this scheduler tick.
+    assert request_b.request_id in (
+        result.prefetched_request_ids
+    )
+
+    assert request_c.request_id in (
+        result.prefetched_request_ids
+    )
+
+    assert request_b.request_id in (
+        result.generated_token_ids
+    )
+
+    assert request_c.request_id in (
+        result.generated_token_ids
+    )
+
+    # Both should now be ready for decode.
+    assert request_b.state == RequestState.DECODING
+    assert request_c.state == RequestState.DECODING
+
+    # Logical KV lengths must reflect each
+    # request's REAL prompt length.
+    assert request_b.kv_tokens == 5
+    assert request_c.kv_tokens == 7
+
+    # Most important batching assertion:
+    #
+    # both cache-hit requests went through
+    # one prefill_with_past() runner call.
+    assert (
+        fake_runner_all_dim.prefill_with_past_batch_sizes
+        == [2]
+    )
+

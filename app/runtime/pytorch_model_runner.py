@@ -20,11 +20,11 @@ logger = logging.getLogger(__name__)
 
 class PyTorchModelRunner(ModelRunner):
     def __init__(
-        self,
-        model_name: str,
-        device: str | None = None,
-        dtype: torch.dtype | None = None,
-    ) -> None:
+            self,
+            model_name: str,
+            device: str | None = None,
+            dtype: torch.dtype | None = None,
+        ) -> None:
         self.model_name = model_name
         self.device = self._resolve_device(device)
         self.dtype = dtype or self._resolve_dtype(self.device)
@@ -114,10 +114,10 @@ class PyTorchModelRunner(ModelRunner):
         return encoded["input_ids"].to(self.device)
 
     def encode_chat_prompt(
-        self,
-        user_message: str,
-        system_message: str | None = None,
-    ) -> torch.Tensor:
+            self,
+            user_message: str,
+            system_message: str | None = None,
+        ) -> torch.Tensor:
         messages: list[dict[str, str]] = []
 
         if system_message:
@@ -145,10 +145,10 @@ class PyTorchModelRunner(ModelRunner):
         return input_ids.to(self.device)
 
     def decode_tokens(
-        self,
-        token_ids: list[int],
-        skip_special_tokens: bool = True,
-    ) -> str:
+            self,
+            token_ids: list[int],
+            skip_special_tokens: bool = True,
+        ) -> str:
         return self.tokenizer.decode(
             token_ids,
             skip_special_tokens=skip_special_tokens,
@@ -156,10 +156,10 @@ class PyTorchModelRunner(ModelRunner):
 
     @torch.inference_mode()
     def prefill(
-        self,
-        input_ids: torch.Tensor,
-        attention_mask: torch.Tensor | None = None,
-    ) -> PrefillOutput:
+            self,
+            input_ids: torch.Tensor,
+            attention_mask: torch.Tensor | None = None,
+        ) -> PrefillOutput:
         self._validate_prefill_input(input_ids)
 
         input_ids = input_ids.to(self.device)
@@ -197,9 +197,9 @@ class PyTorchModelRunner(ModelRunner):
 
     @torch.inference_mode()
     def prefill_batch(
-        self,
-        batch: PrefillBatch,
-    ) -> BatchedPrefillOutput:
+            self,
+            batch: PrefillBatch,
+        ) -> BatchedPrefillOutput:
         input_ids = batch.input_ids.to(self.device)
 
         attention_mask = batch.attention_mask.to(
@@ -257,11 +257,11 @@ class PyTorchModelRunner(ModelRunner):
 
     @torch.inference_mode()
     def decode(
-        self,
-        input_ids: torch.Tensor,
-        past_key_values: Any,
-        attention_mask: torch.Tensor | None = None,
-    ) -> DecodeOutput:
+            self,
+            input_ids: torch.Tensor,
+            past_key_values: Any,
+            attention_mask: torch.Tensor | None = None,
+        ) -> DecodeOutput:
         self._validate_decode_input(input_ids, past_key_values)
 
         input_ids = input_ids.to(self.device)
@@ -300,9 +300,9 @@ class PyTorchModelRunner(ModelRunner):
 
     @torch.inference_mode()
     def decode_batch(
-        self,
-        batch: DecodeBatch,
-    ) -> BatchedDecodeOutput:
+            self,
+            batch: DecodeBatch,
+        ) -> BatchedDecodeOutput:
         input_ids = batch.input_ids.to(self.device)
 
         past_key_values = move_cache_to_device(
@@ -382,9 +382,9 @@ class PyTorchModelRunner(ModelRunner):
 
     @staticmethod
     def _validate_decode_input(
-        input_ids: torch.Tensor,
-        past_key_values: Any,
-    ) -> None:
+            input_ids: torch.Tensor,
+            past_key_values: Any,
+        ) -> None:
         if input_ids.ndim != 2:
             raise ValueError(
                 "decode input_ids must have shape [batch_size, 1]"
@@ -404,64 +404,49 @@ class PyTorchModelRunner(ModelRunner):
         
 
     def prefill_with_past(
-        self,
-        *,
-        input_ids: torch.Tensor,
-        past_key_values,
-        attention_mask: torch.Tensor,
-        position_ids: torch.Tensor,
-    ) -> tuple[int, tuple]:
-        """
-        Run suffix-only prefill using an existing KV cache.
-
-        Expected shapes:
-            input_ids:
-                [1, suffix_length]
-
-            attention_mask:
-                [1, cached_prefix_length + suffix_length]
-
-            position_ids:
-                [1, suffix_length]
-
-            past_key_values:
-                per-layer KV cache with sequence length
-                == cached_prefix_length
-        """
-
+            self,
+            *,
+            input_ids: torch.Tensor,
+            past_key_values,
+            attention_mask: torch.Tensor,
+            position_ids: torch.Tensor,
+        ) -> tuple[list[int], tuple]:
         if input_ids.ndim != 2:
             raise ValueError(
-                "input_ids must have shape [batch_size, seq_len]"
-            )
-
-        if input_ids.shape[0] != 1:
-            raise ValueError(
-                "prefill_with_past currently supports batch size 1 only"
+                "input_ids must have shape "
+                "[batch_size, seq_len]"
             )
 
         if input_ids.shape[1] <= 0:
             raise ValueError(
-                "suffix input_ids must contain at least one token"
+                "suffix input_ids must contain "
+                "at least one token"
             )
+
+        batch_size = input_ids.shape[0]
 
         if attention_mask.ndim != 2:
             raise ValueError(
-                "attention_mask must have shape [batch_size, total_seq_len]"
+                "attention_mask must have shape "
+                "[batch_size, total_seq_len]"
             )
 
-        if attention_mask.shape[0] != 1:
+        if attention_mask.shape[0] != batch_size:
             raise ValueError(
-                "attention_mask batch size must be 1"
+                "attention_mask batch size must match "
+                "input_ids batch size"
             )
 
         if position_ids.ndim != 2:
             raise ValueError(
-                "position_ids must have shape [batch_size, suffix_len]"
+                "position_ids must have shape "
+                "[batch_size, suffix_len]"
             )
 
         if position_ids.shape != input_ids.shape:
             raise ValueError(
-                "position_ids shape must match input_ids shape"
+                "position_ids shape must match "
+                "input_ids shape"
             )
 
         if past_key_values is None:
@@ -469,15 +454,31 @@ class PyTorchModelRunner(ModelRunner):
                 "past_key_values must not be None"
             )
 
-        cached_kv_length = (
-            past_key_values[0][0].shape[2]
+        if len(past_key_values) == 0:
+            raise ValueError(
+                "past_key_values must contain "
+                "at least one layer"
+            )
+
+        first_key = past_key_values[0][0]
+
+        if first_key.shape[0] != batch_size:
+            raise ValueError(
+                "past_key_values batch size must match "
+                "input_ids batch size"
+            )
+
+        cached_kv_length = int(
+            first_key.shape[2]
         )
 
-        suffix_length = input_ids.shape[1]
+        max_suffix_length = int(
+            input_ids.shape[1]
+        )
 
         expected_attention_length = (
             cached_kv_length
-            + suffix_length
+            + max_suffix_length
         )
 
         if (
@@ -486,7 +487,7 @@ class PyTorchModelRunner(ModelRunner):
         ):
             raise ValueError(
                 "attention_mask length must equal "
-                "cached KV length + suffix length"
+                "cached KV length + padded suffix length"
             )
 
         input_ids = input_ids.to(
@@ -503,6 +504,32 @@ class PyTorchModelRunner(ModelRunner):
             dtype=torch.long,
         )
 
+        # Derive each request's REAL suffix length
+        # from the attention mask.
+        total_sequence_lengths = (
+            attention_mask.sum(dim=1)
+        )
+
+        suffix_lengths = (
+            total_sequence_lengths
+            - cached_kv_length
+        ).to(dtype=torch.long)
+
+        if torch.any(suffix_lengths <= 0):
+            raise ValueError(
+                "every request must contain at least "
+                "one real suffix token"
+            )
+
+
+        if torch.any(
+            suffix_lengths > max_suffix_length
+        ):
+            raise ValueError(
+                "derived suffix length exceeds "
+                "padded suffix length"
+            )
+
         with torch.no_grad():
             output = self.model(
                 input_ids=input_ids,
@@ -512,16 +539,37 @@ class PyTorchModelRunner(ModelRunner):
                 use_cache=True,
             )
 
-        next_token_ids = torch.argmax(
-            output.logits[:, -1, :],
+        last_suffix_indices = (
+            suffix_lengths - 1
+        )
+
+        batch_indices = torch.arange(
+            batch_size,
+            device=output.logits.device,
+        )
+
+        last_token_logits = output.logits[
+            batch_indices,
+            last_suffix_indices,
+            :,
+        ]
+
+        next_token_ids_tensor = torch.argmax(
+            last_token_logits,
             dim=-1,
         )
 
-        next_token_id = int(
-            next_token_ids.item()
-        )
+        next_token_ids = [
+            int(token_id)
+            for token_id in (
+                next_token_ids_tensor
+                .detach()
+                .cpu()
+                .tolist()
+            )
+        ]
 
         return (
-            next_token_id,
+            next_token_ids,
             output.past_key_values,
         )

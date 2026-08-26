@@ -13,6 +13,7 @@ class FakeRunner:
             num_kv_heads: int=1,
         ) -> None:
         self.prefill_calls: list[list[str]] = []
+        self.prefill_with_past_batch_sizes: list[int] = []
         self.decode_calls: list[list[str]] = []
 
         self.decode_counts: dict[str, int] = {}
@@ -29,11 +30,11 @@ class FakeRunner:
         self.vocab_size = 10000
 
     def _make_batched_kv_cache(
-        self,
-        *,
-        batch_size: int,
-        sequence_length: int,
-    ):
+            self,
+            *,
+            batch_size: int,
+            sequence_length: int,
+        ):
         layers = []
 
         for _ in range(self.num_layers):
@@ -63,11 +64,11 @@ class FakeRunner:
         return tuple(layers)
 
     def _make_logits(
-        self,
-        *,
-        batch_size: int,
-        sequence_length: int,
-    ) -> torch.Tensor:
+            self,
+            *,
+            batch_size: int,
+            sequence_length: int,
+        ) -> torch.Tensor:
         return torch.zeros(
             (
                 batch_size,
@@ -77,20 +78,10 @@ class FakeRunner:
             dtype=torch.float32,
         )
 
-    # def prefill_batch(
-    #     self,
-    #     requests: list[Request],
-    # ) -> BatchedPrefillOutput:
-    #     self.prefill_calls.append(
-    #         [
-    #             request.request_id
-    #             for request in requests
-    #         ]
-    #     )
     def prefill_batch(
-        self,
-        batch: PrefillBatch,
-    ) -> BatchedPrefillOutput:
+            self,
+            batch: PrefillBatch,
+        ) -> BatchedPrefillOutput:
         self.prefill_calls.append(
             list(batch.request_ids)
         )
@@ -122,10 +113,58 @@ class FakeRunner:
             ),
         )
 
+    def prefill_with_past(
+            self,
+            *,
+            input_ids: torch.Tensor,
+            past_key_values,
+            attention_mask: torch.Tensor,
+            position_ids: torch.Tensor,
+        ):
+        batch_size = int(
+            input_ids.shape[0]
+        )
+
+        self.prefill_with_past_batch_sizes.append(
+            batch_size
+        )
+
+        cached_kv_length = (
+            get_kv_sequence_length(
+                past_key_values
+            )
+        )
+
+        padded_suffix_length = int(
+            input_ids.shape[1]
+        )
+
+        updated_kv_length = (
+            cached_kv_length
+            + padded_suffix_length
+        )
+
+        next_token_ids = [
+            1000 + index
+            for index in range(batch_size)
+        ]
+
+        updated_kv = (
+            self._make_batched_kv_cache(
+                batch_size=batch_size,
+                sequence_length=updated_kv_length,
+            )
+        )
+
+        return (
+            next_token_ids,
+            updated_kv,
+        )
+
     def decode_batch(
-        self,
-        batch: DecodeBatch,
-    ) -> BatchedDecodeOutput:
+            self,
+            batch: DecodeBatch,
+        ) -> BatchedDecodeOutput:
         self.decode_calls.append(
             list(batch.request_ids)
         )
