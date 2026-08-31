@@ -236,10 +236,6 @@ def test_requests_receive_disjoint_blocks() -> None:
     assert manager.num_free_blocks == 0
     assert manager.num_allocated_blocks == 4
 
-    assert manager.owner_of(0) == "request-a"
-    assert manager.owner_of(2) == "request-b"
-
-
 def test_ensure_capacity_allocates_incrementally() -> None:
     manager = KVBlockManager(
         num_blocks=4,
@@ -423,7 +419,7 @@ def test_additional_blocks_required() -> None:
         == 1
     )
 
-def test_free_releases_request_blocks() -> None:
+def test_release_blocks_releases_request_blocks() -> None:
     manager = KVBlockManager(
         num_blocks=4,
         block_size=4,
@@ -436,9 +432,16 @@ def test_free_releases_request_blocks() -> None:
         num_blocks=2,
     )
 
-    released = manager.free(request)
+    assert request.block_table == [0, 1]
 
-    assert released == [0, 1]
+    block_ids = list(request.block_table)
+
+    manager.release_blocks(block_ids)
+
+    # release_blocks manages physical block lifetime.
+    # Request lifecycle owns the request-side block table.
+    request.block_table.clear()
+
     assert request.block_table == []
 
     assert manager.num_free_blocks == 4
@@ -450,26 +453,15 @@ def test_free_releases_request_blocks() -> None:
         == manager.num_blocks
     )
 
-def test_free_empty_request_is_idempotent() -> None:
+
+def test_release_empty_block_list_changes_nothing() -> None:
     manager = KVBlockManager(
         num_blocks=4,
         block_size=4,
     )
 
-    request = make_request()
+    manager.release_blocks([])
 
-    manager.allocate(
-        request=request,
-        num_blocks=2,
-    )
-
-    first_release = manager.free(request)
-    second_release = manager.free(request)
-
-    assert first_release == [0, 1]
-    assert second_release == []
-
-    assert request.block_table == []
     assert manager.num_free_blocks == 4
     assert manager.num_allocated_blocks == 0
 
@@ -488,12 +480,20 @@ def test_released_blocks_are_reusable() -> None:
     )
 
     assert allocated_a == [0, 1]
+    assert request_a.block_table == [0, 1]
+
     assert manager.num_free_blocks == 0
+    assert manager.num_allocated_blocks == 2
 
-    released = manager.free(request_a)
+    block_ids_a = list(request_a.block_table)
 
-    assert released == [0, 1]
+    manager.release_blocks(block_ids_a)
+    request_a.block_table.clear()
+
+    assert request_a.block_table == []
+
     assert manager.num_free_blocks == 2
+    assert manager.num_allocated_blocks == 0
 
     allocated_b = manager.allocate(
         request=request_b,
@@ -503,7 +503,10 @@ def test_released_blocks_are_reusable() -> None:
     assert allocated_b == [0, 1]
     assert request_b.block_table == [0, 1]
 
-def test_free_preserves_other_request_blocks() -> None:
+    assert manager.num_free_blocks == 0
+    assert manager.num_allocated_blocks == 2
+
+def test_release_blocks_preserves_other_request_blocks() -> None:
     manager = KVBlockManager(
         num_blocks=4,
         block_size=4,
@@ -522,54 +525,24 @@ def test_free_preserves_other_request_blocks() -> None:
         num_blocks=2,
     )
 
-    released = manager.free(request_a)
+    assert request_a.block_table == [0, 1]
+    assert request_b.block_table == [2, 3]
 
-    assert released == [0, 1]
+    block_ids_a = list(request_a.block_table)
+
+    manager.release_blocks(block_ids_a)
+    request_a.block_table.clear()
+
     assert request_a.block_table == []
 
+    # B's block table must be untouched.
     assert request_b.block_table == [2, 3]
 
     assert manager.num_free_blocks == 2
     assert manager.num_allocated_blocks == 2
 
-def test_free_rejects_wrong_block_owner() -> None:
-    manager = KVBlockManager(
-        num_blocks=4,
-        block_size=4,
-    )
 
-    request_a = make_request("request-a")
-    request_b = make_request("request-b")
-
-    manager.allocate(
-        request=request_a,
-        num_blocks=1,
-    )
-
-    manager.allocate(
-        request=request_b,
-        num_blocks=1,
-    )
-
-    assert request_a.block_table == [0]
-    assert request_b.block_table == [1]
-
-    request_a.block_table.append(1)
-
-    with pytest.raises(
-        RuntimeError,
-        match="owned by request-b",
-    ):
-        manager.free(request_a)
-
-    # Free must fail atomically.
-    assert request_a.block_table == [0, 1]
-    assert request_b.block_table == [1]
-
-    assert manager.num_free_blocks == 2
-    assert manager.num_allocated_blocks == 2
-
-def test_free_rejects_unowned_block() -> None:
+def test_retained_block_is_not_freed_until_last_reference_released() -> None:
     manager = KVBlockManager(
         num_blocks=4,
         block_size=4,
@@ -577,15 +550,52 @@ def test_free_rejects_unowned_block() -> None:
 
     request = make_request()
 
-    request.block_table.append(3)
+    manager.allocate(
+        request=request,
+        num_blocks=1,
+    )
 
+    assert request.block_table == [0]
+
+    block_id = request.block_table[0]
+
+    # Initial allocation owns one reference.
+    assert manager.num_allocated_blocks == 1
+    assert manager.num_free_blocks == 3
+
+    # Simulate PrefixCache retaining the same block.
+    manager.retain_blocks([block_id])
+
+    assert manager.num_allocated_blocks == 1
+    assert manager.num_free_blocks == 3
+
+    # Request releases its reference.
+    manager.release_blocks([block_id])
+    request.block_table.clear()
+
+    # Cache still holds one reference.
+    assert manager.num_allocated_blocks == 1
+    assert manager.num_free_blocks == 3
+
+    # Cache releases final reference.
+    manager.release_blocks([block_id])
+
+    assert manager.num_allocated_blocks == 0
+    assert manager.num_free_blocks == 4
+
+def test_release_blocks_rejects_unallocated_block() -> None:
+    manager = KVBlockManager(
+        num_blocks=4,
+        block_size=4,
+    )
+
+    # Block 3 has never been allocated.
     with pytest.raises(
-        RuntimeError,
-        match="Block 3 has no owner",
+        ValueError,
+        match="block 3 is not allocated",
     ):
-        manager.free(request)
+        manager.release_blocks([3])
 
-    assert request.block_table == [3]
     assert manager.num_free_blocks == 4
     assert manager.num_allocated_blocks == 0
 

@@ -767,10 +767,10 @@ def test_select_prefill_rolls_back_cached_prefix_when_no_capacity(
     )
 
 def test_select_prefill_uses_shorter_cached_prefix_when_longest_misses(
-    scheduler,
-    block_manager,
-    prefix_cache,
-) -> None:
+        scheduler,
+        block_manager,
+        prefix_cache,
+    ) -> None:
     request_a = make_request(
         request_id="A",
         input_ids=[10, 11, 12, 13],
@@ -1120,11 +1120,11 @@ def test_write_request_kv_prefix_cache_with_padding() -> None:
     )
 
 def test_prefix_hit_prefill_does_not_overwrite_shared_prefix_block(
-    scheduler,
-    block_manager,
-    paged_kv_cache,
-    prefix_cache,
-) -> None:
+            scheduler,
+            block_manager,
+            paged_kv_cache,
+            prefix_cache,
+        ) -> None:
     # A has one full cacheable block plus a suffix.
     request_a = make_request(
         request_id="A",
@@ -1242,8 +1242,8 @@ from app.runtime.pytorch_model_runner import (
 
 @pytest.mark.integration
 def test_prefill_with_past_matches_full_prefill(
-    real_runner: PyTorchModelRunner,
-) -> None:
+        real_runner: PyTorchModelRunner,
+    ) -> None:
     # -------------------------
     # Build a real token sequence
     # -------------------------
@@ -1411,6 +1411,7 @@ def test_prefill_with_past_matches_full_prefill(
         position_ids=(
             suffix_position_ids
         ),
+        suffix_lengths=[suffix_length],
     )
 
     # ==================================================
@@ -1467,9 +1468,9 @@ def test_prefill_with_past_matches_full_prefill(
 
 @pytest.mark.integration
 def test_scheduler_cached_prefix_matches_full_prefill(
-    real_runner,
-    make_paged_kv_cache_qwen,
-) -> None:
+        real_runner,
+        make_paged_kv_cache_qwen,
+    ) -> None:
     # ==================================================
     # Path A: baseline full prefill
     # ==================================================
@@ -1647,11 +1648,11 @@ def test_scheduler_cached_prefix_matches_full_prefill(
     )
 
 def test_cache_hit_extends_prefix_cache_with_new_full_block(
-    scheduler,
-    block_manager,
-    paged_kv_cache,
-    prefix_cache,
-) -> None:
+        scheduler,
+        block_manager,
+        paged_kv_cache,
+        prefix_cache,
+    ) -> None:
     # Step 1:
     # Seed one full cached block.
     request_a = make_request(
@@ -1728,8 +1729,8 @@ def test_cache_hit_extends_prefix_cache_with_new_full_block(
 
 # test overlapping prefix entries and reference counts.
 def test_overlapping_prefix_entries_keep_shared_block_alive(
-    block_manager,
-) -> None:
+        block_manager,
+    ) -> None:
     request = make_request(
         request_id="A",
         input_ids=[
@@ -1892,10 +1893,10 @@ def test_overlapping_prefix_entries_keep_shared_block_alive(
     )
 
 def test_scheduler_created_overlapping_prefixes_have_correct_ref_counts(
-    scheduler,
-    block_manager,
-    prefix_cache,
-) -> None:
+        scheduler,
+        block_manager,
+        prefix_cache,
+    ) -> None:
     # Step 1:
     # Request A creates the first cached prefix:
     #
@@ -2029,10 +2030,10 @@ def test_scheduler_created_overlapping_prefixes_have_correct_ref_counts(
     )
 
 def test_finished_request_releases_own_reference_but_cache_keeps_block_alive(
-    scheduler,
-    block_manager,
-    prefix_cache,
-) -> None:
+        scheduler,
+        block_manager,
+        prefix_cache,
+    ) -> None:
     request = make_request(
         request_id="A",
         input_ids=[1, 2, 3, 4],
@@ -2124,10 +2125,10 @@ def test_finished_request_releases_own_reference_but_cache_keeps_block_alive(
     )
 
 def test_new_request_reuses_prefix_after_original_request_finishes(
-    scheduler,
-    block_manager,
-    prefix_cache,
-) -> None:
+        scheduler,
+        block_manager,
+        prefix_cache,
+    ) -> None:
     # ----------------------------------
     # Step 1:
     # A creates a cacheable prefix.
@@ -2543,9 +2544,9 @@ def test_two_equal_length_cache_hits_use_one_batched_prefill_with_past(
     )
 
 def test_cached_prefill_batches_variable_suffix_lengths(
-    scheduler_fake_runner,
-    fake_runner_all_dim,
-) -> None:
+        scheduler_fake_runner,
+        fake_runner_all_dim,
+    ) -> None:
     scheduler = scheduler_fake_runner
 
     assert scheduler.runner is fake_runner_all_dim
@@ -2635,4 +2636,974 @@ def test_cached_prefill_batches_variable_suffix_lengths(
         fake_runner_all_dim.prefill_with_past_batch_sizes
         == [2]
     )
+
+def test_cached_prefill_batches_variable_prefix_lengths(
+        scheduler_fake_runner,
+        fake_runner_all_dim,
+    ) -> None:
+    scheduler = scheduler_fake_runner
+
+    assert scheduler.runner is fake_runner_all_dim
+
+    # ----------------------------------------
+    # Seed short prefix:
+    # [10, 11, 12, 13]
+    # cached length = 4
+    # ----------------------------------------
+    source_short = make_request(
+        request_id="source-short",
+        input_ids=[
+            10,
+            11,
+            12,
+            13,
+        ],
+    )
+
+    scheduler.add_request(source_short)
+    scheduler.step()
+
+    while source_short.state != RequestState.FINISHED:
+        scheduler.step()
+
+    # ----------------------------------------
+    # Seed long prefix:
+    # [20, 21, 22, 23, 24, 25, 26, 27]
+    # cached length = 8
+    # ----------------------------------------
+    source_long = make_request(
+        request_id="source-long",
+        input_ids=[
+            20,
+            21,
+            22,
+            23,
+            24,
+            25,
+            26,
+            27,
+        ],
+    )
+
+    scheduler.add_request(source_long)
+    scheduler.step()
+
+    while source_long.state != RequestState.FINISHED:
+        scheduler.step()
+
+    fake_runner_all_dim.prefill_with_past_batch_sizes.clear()
+
+    # B:
+    # cached prefix = 4
+    # suffix = [99]
+    request_b = make_request(
+        request_id="B",
+        input_ids=[
+            10,
+            11,
+            12,
+            13,
+            99,
+        ],
+    )
+
+    # C:
+    # cached prefix = 8
+    # suffix = [100]
+    request_c = make_request(
+        request_id="C",
+        input_ids=[
+            20,
+            21,
+            22,
+            23,
+            24,
+            25,
+            26,
+            27,
+            100,
+        ],
+    )
+
+    scheduler.add_request(request_b)
+    scheduler.add_request(request_c)
+
+    result = scheduler.step()
+
+    assert request_b.request_id in (
+        result.prefetched_request_ids
+    )
+
+    assert request_c.request_id in (
+        result.prefetched_request_ids
+    )
+
+    assert request_b.request_id in (
+        result.generated_token_ids
+    )
+
+    assert request_c.request_id in (
+        result.generated_token_ids
+    )
+
+    assert request_b.state == RequestState.DECODING
+    assert request_c.state == RequestState.DECODING
+
+    # Logical KV lengths.
+    assert request_b.kv_tokens == 5
+    assert request_c.kv_tokens == 9
+
+    # One batched cached-prefill runner call.
+    assert (
+        fake_runner_all_dim.prefill_with_past_batch_sizes
+        == [2]
+    )
+
+
+def test_cached_prefill_variable_prefix_lengths_are_order_independent(
+        scheduler_fake_runner,
+        fake_runner_all_dim,
+    ) -> None:
+    scheduler = scheduler_fake_runner
+
+    source_short = make_request(
+        request_id="source-short",
+        input_ids=[
+            10,
+            11,
+            12,
+            13,
+        ],
+    )
+
+    scheduler.add_request(source_short)
+    scheduler.step()
+
+    while source_short.state != RequestState.FINISHED:
+        scheduler.step()
+
+    source_long = make_request(
+        request_id="source-long",
+        input_ids=[
+            20,
+            21,
+            22,
+            23,
+            24,
+            25,
+            26,
+            27,
+        ],
+    )
+
+    scheduler.add_request(source_long)
+    scheduler.step()
+
+    while source_long.state != RequestState.FINISHED:
+        scheduler.step()
+
+    fake_runner_all_dim.prefill_with_past_batch_sizes.clear()
+
+    # Add LONG prefix request first.
+    request_long = make_request(
+        request_id="long",
+        input_ids=[
+            20,
+            21,
+            22,
+            23,
+            24,
+            25,
+            26,
+            27,
+            100,
+        ],
+    )
+
+    # Add SHORT prefix request second.
+    request_short = make_request(
+        request_id="short",
+        input_ids=[
+            10,
+            11,
+            12,
+            13,
+            99,
+        ],
+    )
+
+    scheduler.add_request(request_long)
+    scheduler.add_request(request_short)
+
+    result = scheduler.step()
+
+    assert request_long.request_id in (
+        result.prefetched_request_ids
+    )
+
+    assert request_short.request_id in (
+        result.prefetched_request_ids
+    )
+
+    assert request_long.state == RequestState.DECODING
+    assert request_short.state == RequestState.DECODING
+
+    assert request_long.kv_tokens == 9
+    assert request_short.kv_tokens == 5
+
+    assert (
+        fake_runner_all_dim.prefill_with_past_batch_sizes
+        == [2]
+    )
+
+def test_cached_prefill_copies_suffix_from_physical_boundary_to_logical_position(
+        scheduler_fake_runner,
+        fake_runner_all_dim,
+        paged_kv_cache,
+    ) -> None:
+    scheduler = scheduler_fake_runner
+
+    # --------------------------------------------------
+    # Seed a 4-token prefix cache.
+    # --------------------------------------------------
+    source_short = make_request(
+        request_id="source-short",
+        input_ids=[
+            10,
+            11,
+            12,
+            13,
+        ],
+    )
+
+    scheduler.add_request(source_short)
+
+    while source_short.state != RequestState.FINISHED:
+        scheduler.step()
+
+    # --------------------------------------------------
+    # Seed an 8-token prefix cache.
+    #
+    # This causes the cached-prefill batch below to have:
+    #
+    # max_cached_prefix_length = 8
+    # --------------------------------------------------
+    source_long = make_request(
+        request_id="source-long",
+        input_ids=[
+            20,
+            21,
+            22,
+            23,
+            24,
+            25,
+            26,
+            27,
+        ],
+    )
+
+    scheduler.add_request(source_long)
+
+    while source_long.state != RequestState.FINISHED:
+        scheduler.step()
+
+    fake_runner_all_dim.prefill_with_past_batch_sizes.clear()
+
+    # --------------------------------------------------
+    # Short cached prefix:
+    #
+    # logical:
+    #
+    # [10 11 12 13] [99]
+    #        4 KV       1 suffix
+    #
+    # physical cached batch:
+    #
+    # [PAD PAD PAD PAD 10 11 12 13] [99]
+    #
+    # Therefore:
+    #
+    # physical suffix source = 8
+    # logical suffix destination = 4
+    # --------------------------------------------------
+    request_short = make_request(
+        request_id="short",
+        input_ids=[
+            10,
+            11,
+            12,
+            13,
+            99,
+        ],
+    )
+
+    # --------------------------------------------------
+    # Long cached prefix:
+    #
+    # [20 21 22 23 24 25 26 27] [100]
+    #
+    # cached prefix = 8
+    # --------------------------------------------------
+    request_long = make_request(
+        request_id="long",
+        input_ids=[
+            20,
+            21,
+            22,
+            23,
+            24,
+            25,
+            26,
+            27,
+            100,
+        ],
+    )
+
+    scheduler.add_request(request_short)
+    scheduler.add_request(request_long)
+
+    result = scheduler.step()
+
+    assert (
+        fake_runner_all_dim.prefill_with_past_batch_sizes
+        == [2]
+    )
+
+    assert request_short.request_id in (
+        result.prefetched_request_ids
+    )
+
+    assert request_long.request_id in (
+        result.prefetched_request_ids
+    )
+
+    # Logical prompt KV lengths after cached prefill.
+    assert request_short.kv_tokens == 5
+    assert request_long.kv_tokens == 9
+
+    # --------------------------------------------------
+    # Materialize SHORT request's logical KV.
+    #
+    # It should have length 5:
+    #
+    # logical:
+    #   0   1   2   3   4
+    # [prefix ........] [suffix]
+    #
+    # The suffix at logical position 4 should have been
+    # copied from PHYSICAL position 8.
+    # --------------------------------------------------
+    short_kv = (
+        paged_kv_cache.materialize_request_kv(
+            block_table=request_short.block_table,
+            num_tokens=request_short.kv_tokens,
+        )
+    )
+
+    assert (
+        get_kv_sequence_length(short_kv)
+        == 5
+    )
+
+    short_key = short_kv[0][0]
+
+    # Shape:
+    #
+    # [1, num_kv_heads, sequence_length, head_dim]
+    #
+    suffix_key = short_key[
+        0,
+        0,
+        4,
+        0,
+    ]
+
+    assert suffix_key.item() == 8.0
+
+@pytest.mark.integration
+def test_batched_prefill_with_different_cached_prefix_lengths_matches_full_prefill(
+    real_runner: PyTorchModelRunner,
+) -> None:
+    # ==================================================
+    # Build two real token sequences
+    # ==================================================
+    full_a = (
+        real_runner.encode_prompt(
+            "The capital of France is Paris"
+        )
+        .squeeze(0)
+    )
+
+    full_b = (
+        real_runner.encode_prompt(
+            "Machine learning systems need efficient inference"
+        )
+        .squeeze(0)
+    )
+
+    assert full_a.ndim == 1
+    assert full_b.ndim == 1
+
+    # We want different cached-prefix lengths.
+    prefix_a_length = 3
+    prefix_b_length = 5
+
+    assert full_a.shape[0] > prefix_a_length
+    assert full_b.shape[0] > prefix_b_length
+
+    suffix_a = full_a[prefix_a_length:]
+    suffix_b = full_b[prefix_b_length:]
+
+    suffix_a_length = int(
+        suffix_a.shape[0]
+    )
+
+    suffix_b_length = int(
+        suffix_b.shape[0]
+    )
+
+    assert suffix_a_length > 0
+    assert suffix_b_length > 0
+
+    # ==================================================
+    # Reference path:
+    # independently full-prefill both requests
+    # ==================================================
+    def full_prefill_next_token(
+        input_ids: torch.Tensor,
+    ) -> int:
+        batch = (
+            input_ids
+            .unsqueeze(0)
+            .to(real_runner.device)
+        )
+
+        sequence_length = int(
+            batch.shape[1]
+        )
+
+        attention_mask = torch.ones(
+            (
+                1,
+                sequence_length,
+            ),
+            dtype=torch.long,
+            device=real_runner.device,
+        )
+
+        position_ids = torch.arange(
+            sequence_length,
+            dtype=torch.long,
+            device=real_runner.device,
+        ).unsqueeze(0)
+
+        with torch.no_grad():
+            output = real_runner.model(
+                input_ids=batch,
+                attention_mask=attention_mask,
+                position_ids=position_ids,
+                use_cache=True,
+            )
+
+        return int(
+            torch.argmax(
+                output.logits[:, -1, :],
+                dim=-1,
+            ).item()
+        )
+
+    expected_a = full_prefill_next_token(
+        full_a
+    )
+
+    expected_b = full_prefill_next_token(
+        full_b
+    )
+
+    # ==================================================
+    # Prefill prefixes independently
+    # ==================================================
+    def build_prefix_kv(
+        input_ids: torch.Tensor,
+    ):
+        batch = (
+            input_ids
+            .unsqueeze(0)
+            .to(real_runner.device)
+        )
+
+        sequence_length = int(
+            batch.shape[1]
+        )
+
+        attention_mask = torch.ones(
+            (
+                1,
+                sequence_length,
+            ),
+            dtype=torch.long,
+            device=real_runner.device,
+        )
+
+        position_ids = torch.arange(
+            sequence_length,
+            dtype=torch.long,
+            device=real_runner.device,
+        ).unsqueeze(0)
+
+        with torch.no_grad():
+            output = real_runner.model(
+                input_ids=batch,
+                attention_mask=attention_mask,
+                position_ids=position_ids,
+                use_cache=True,
+            )
+
+        return output.past_key_values
+
+    kv_a = build_prefix_kv(
+        full_a[:prefix_a_length]
+    )
+
+    kv_b = build_prefix_kv(
+        full_b[:prefix_b_length]
+    )
+
+    assert (
+        get_kv_sequence_length(kv_a)
+        == prefix_a_length
+    )
+
+    assert (
+        get_kv_sequence_length(kv_b)
+        == prefix_b_length
+    )
+
+    # ==================================================
+    # Left-pad cached KV to common physical length
+    #
+    # A:
+    # [PAD PAD | real real real]
+    #
+    # B:
+    # [real real real real real]
+    # ==================================================
+    max_prefix_length = max(
+        prefix_a_length,
+        prefix_b_length,
+    )
+
+    def left_pad_single_kv(
+        past_key_values,
+        target_length: int,
+    ):
+        current_length = (
+            get_kv_sequence_length(
+                past_key_values
+            )
+        )
+
+        pad_length = (
+            target_length
+            - current_length
+        )
+
+        padded_layers = []
+
+        for key, value in past_key_values:
+            if pad_length > 0:
+                key_padding = torch.zeros(
+                    (
+                        key.shape[0],
+                        key.shape[1],
+                        pad_length,
+                        key.shape[3],
+                    ),
+                    dtype=key.dtype,
+                    device=key.device,
+                )
+
+                value_padding = torch.zeros(
+                    (
+                        value.shape[0],
+                        value.shape[1],
+                        pad_length,
+                        value.shape[3],
+                    ),
+                    dtype=value.dtype,
+                    device=value.device,
+                )
+
+                key = torch.cat(
+                    (
+                        key_padding,
+                        key,
+                    ),
+                    dim=2,
+                )
+
+                value = torch.cat(
+                    (
+                        value_padding,
+                        value,
+                    ),
+                    dim=2,
+                )
+
+            padded_layers.append(
+                (
+                    key,
+                    value,
+                )
+            )
+
+        return tuple(
+            padded_layers
+        )
+
+    padded_kv_a = left_pad_single_kv(
+        kv_a,
+        max_prefix_length,
+    )
+
+    padded_kv_b = left_pad_single_kv(
+        kv_b,
+        max_prefix_length,
+    )
+
+    # ==================================================
+    # Concatenate the two padded caches into one batch
+    # ==================================================
+    batched_layers = []
+
+    for (
+        (key_a, value_a),
+        (key_b, value_b),
+    ) in zip(
+        padded_kv_a,
+        padded_kv_b,
+    ):
+        batched_layers.append(
+            (
+                torch.cat(
+                    (
+                        key_a,
+                        key_b,
+                    ),
+                    dim=0,
+                ),
+                torch.cat(
+                    (
+                        value_a,
+                        value_b,
+                    ),
+                    dim=0,
+                ),
+            )
+        )
+
+    batched_past_key_values = tuple(
+        batched_layers
+    )
+
+    assert (
+        get_kv_sequence_length(
+            batched_past_key_values
+        )
+        == max_prefix_length
+    )
+
+    # ==================================================
+    # Right-pad suffix input_ids
+    # ==================================================
+    max_suffix_length = max(
+        suffix_a_length,
+        suffix_b_length,
+    )
+
+    input_ids = torch.full(
+        (
+            2,
+            max_suffix_length,
+        ),
+        fill_value=real_runner.pad_token_id,
+        dtype=torch.long,
+        device=real_runner.device,
+    )
+
+    input_ids[
+        0,
+        :suffix_a_length,
+    ] = suffix_a.to(
+        real_runner.device
+    )
+
+    input_ids[
+        1,
+        :suffix_b_length,
+    ] = suffix_b.to(
+        real_runner.device
+    )
+
+    # ==================================================
+    # Position IDs
+    #
+    # Important:
+    #
+    # positions are LOGICAL positions,
+    # not physical padded-KV positions.
+    # ==================================================
+    position_ids = torch.zeros(
+        (
+            2,
+            max_suffix_length,
+        ),
+        dtype=torch.long,
+        device=real_runner.device,
+    )
+
+    position_ids[
+        0,
+        :suffix_a_length,
+    ] = torch.arange(
+        prefix_a_length,
+        prefix_a_length + suffix_a_length,
+        dtype=torch.long,
+        device=real_runner.device,
+    )
+
+    position_ids[
+        1,
+        :suffix_b_length,
+    ] = torch.arange(
+        prefix_b_length,
+        prefix_b_length + suffix_b_length,
+        dtype=torch.long,
+        device=real_runner.device,
+    )
+
+    # ==================================================
+    # Attention mask
+    #
+    # A:
+    # [0 0 1 1 1 | suffix... | 0 0]
+    #
+    # B:
+    # [1 1 1 1 1 | suffix...]
+    # ==================================================
+    attention_mask = torch.zeros(
+        (
+            2,
+            max_prefix_length
+            + max_suffix_length,
+        ),
+        dtype=torch.long,
+        device=real_runner.device,
+    )
+
+    # Request A cached prefix
+    prefix_a_start = (
+        max_prefix_length
+        - prefix_a_length
+    )
+
+    attention_mask[
+        0,
+        prefix_a_start:max_prefix_length,
+    ] = 1
+
+    attention_mask[
+        0,
+        max_prefix_length:
+        max_prefix_length + suffix_a_length,
+    ] = 1
+
+    # Request B cached prefix
+    prefix_b_start = (
+        max_prefix_length
+        - prefix_b_length
+    )
+
+    attention_mask[
+        1,
+        prefix_b_start:max_prefix_length,
+    ] = 1
+
+    attention_mask[
+        1,
+        max_prefix_length:
+        max_prefix_length + suffix_b_length,
+    ] = 1
+
+    # ==================================================
+    # One real batched cached-prefill
+    # ==================================================
+    (
+        actual_next_token_ids,
+        updated_kv,
+    ) = real_runner.prefill_with_past(
+        input_ids=input_ids,
+        past_key_values=batched_past_key_values,
+        attention_mask=attention_mask,
+        position_ids=position_ids,
+        suffix_lengths=[
+            suffix_a_length,
+            suffix_b_length,
+        ],
+    )
+
+    # ==================================================
+    # Verify semantic equivalence
+    # ==================================================
+    assert len(actual_next_token_ids) == 2
+
+    assert (
+        actual_next_token_ids[0]
+        == expected_a
+    )
+
+    assert (
+        actual_next_token_ids[1]
+        == expected_b
+    )
+
+    # Physical output KV contains:
+    #
+    # max padded prefix
+    # +
+    # max padded suffix
+    #
+    assert (
+        get_kv_sequence_length(updated_kv)
+        ==
+        max_prefix_length
+        + max_suffix_length
+    )
+
+    ############# end-to-end scheduler integration test using the real runner ##########
+@pytest.mark.integration
+def test_scheduler_cached_prefill_with_variable_prefix_lengths_real_runner(
+        scheduler,
+        real_runner,
+    ) -> None:
+    # ----------------------------------------
+    # Seed short cached prefix.
+    # ----------------------------------------
+    short_prefix_ids = (
+        real_runner.encode_prompt(
+            "The capital of France"
+        )
+        .squeeze(0)
+        .tolist()
+    )
+
+    # Make sure the prefix contains at least
+    # one full cache block.
+    assert len(short_prefix_ids) >= 4
+
+    short_prefix_ids = short_prefix_ids[:4]
+
+    source_short = make_request(
+        request_id="source-short",
+        input_ids=short_prefix_ids,
+        max_new_tokens=1,
+    )
+
+    scheduler.add_request(source_short)
+
+    while source_short.state != RequestState.FINISHED:
+        scheduler.step()
+
+    # ----------------------------------------
+    # Seed long cached prefix.
+    # ----------------------------------------
+    long_prefix_ids = (
+        real_runner.encode_prompt(
+            "Machine learning inference systems "
+            "need efficient memory management"
+        )
+        .squeeze(0)
+        .tolist()
+    )
+
+    assert len(long_prefix_ids) >= 8
+
+    long_prefix_ids = long_prefix_ids[:8]
+
+    source_long = make_request(
+        request_id="source-long",
+        input_ids=long_prefix_ids,
+        max_new_tokens=1,
+    )
+
+    scheduler.add_request(source_long)
+
+    while source_long.state != RequestState.FINISHED:
+        scheduler.step()
+
+    # ----------------------------------------
+    # Build cache-hit requests.
+    #
+    # Different:
+    #   cached prefix lengths
+    #   suffix lengths
+    # ----------------------------------------
+    request_short = make_request(
+        request_id="short",
+        input_ids=(
+            short_prefix_ids
+            + [1234]
+        ),
+        max_new_tokens=3,
+    )
+
+    request_long = make_request(
+        request_id="long",
+        input_ids=(
+            long_prefix_ids
+            + [2345, 3456]
+        ),
+        max_new_tokens=3,
+    )
+
+    scheduler.add_request(request_short)
+    scheduler.add_request(request_long)
+
+    # ----------------------------------------
+    # Cached prefill should happen together.
+    # ----------------------------------------
+    result = scheduler.step()
+
+    assert (
+        request_short.request_id
+        in result.prefetched_request_ids
+    )
+
+    assert (
+        request_long.request_id
+        in result.prefetched_request_ids
+    )
+
+    # Scheduler should have completed
+    # logical prompt KV construction.
+    assert (
+        request_short.kv_tokens
+        == len(request_short.input_ids)
+    )
+
+    assert (
+        request_long.kv_tokens
+        == len(request_long.input_ids)
+    )
+
+    assert (
+        request_short.state
+        == RequestState.DECODING
+    )
+
+    assert (
+        request_long.state
+        == RequestState.DECODING
+    )
+
 

@@ -402,7 +402,7 @@ class PyTorchModelRunner(ModelRunner):
                 "or a previous decode step"
             )
         
-
+    @torch.inference_mode()
     def prefill_with_past(
             self,
             *,
@@ -410,6 +410,7 @@ class PyTorchModelRunner(ModelRunner):
             past_key_values,
             attention_mask: torch.Tensor,
             position_ids: torch.Tensor,
+            suffix_lengths: list[int],
         ) -> tuple[list[int], tuple]:
         if input_ids.ndim != 2:
             raise ValueError(
@@ -475,6 +476,28 @@ class PyTorchModelRunner(ModelRunner):
         max_suffix_length = int(
             input_ids.shape[1]
         )
+        if len(suffix_lengths) != batch_size:
+            raise ValueError(
+                "suffix_lengths size must match batch size"
+            )
+
+        if any(
+            suffix_length <= 0
+            for suffix_length in suffix_lengths
+        ):
+            raise ValueError(
+                "every request must contain at least "
+                "one real suffix token"
+            )
+
+        if any(
+            suffix_length > max_suffix_length
+            for suffix_length in suffix_lengths
+        ):
+            raise ValueError(
+                "suffix length cannot exceed "
+                "padded suffix length"
+            )
 
         expected_attention_length = (
             cached_kv_length
@@ -504,43 +527,31 @@ class PyTorchModelRunner(ModelRunner):
             dtype=torch.long,
         )
 
-        # Derive each request's REAL suffix length
-        # from the attention mask.
-        total_sequence_lengths = (
-            attention_mask.sum(dim=1)
+        output = self.model(
+            input_ids=input_ids,
+            past_key_values=past_key_values,
+            attention_mask=attention_mask,
+            position_ids=position_ids,
+            use_cache=True,
         )
 
-        suffix_lengths = (
-            total_sequence_lengths
-            - cached_kv_length
-        ).to(dtype=torch.long)
-
-        if torch.any(suffix_lengths <= 0):
-            raise ValueError(
-                "every request must contain at least "
-                "one real suffix token"
-            )
-
-
-        if torch.any(
-            suffix_lengths > max_suffix_length
+        if output.logits.shape[:2] != (
+            batch_size,
+            max_suffix_length,
         ):
-            raise ValueError(
-                "derived suffix length exceeds "
-                "padded suffix length"
+            raise RuntimeError(
+                "prefill_with_past logits shape does not "
+                "match padded suffix batch"
             )
 
-        with torch.no_grad():
-            output = self.model(
-                input_ids=input_ids,
-                past_key_values=past_key_values,
-                attention_mask=attention_mask,
-                position_ids=position_ids,
-                use_cache=True,
-            )
+        suffix_lengths_tensor = torch.tensor(
+            suffix_lengths,
+            dtype=torch.long,
+            device=output.logits.device,
+        )
 
         last_suffix_indices = (
-            suffix_lengths - 1
+            suffix_lengths_tensor - 1
         )
 
         batch_indices = torch.arange(
@@ -573,3 +584,4 @@ class PyTorchModelRunner(ModelRunner):
             next_token_ids,
             output.past_key_values,
         )
+

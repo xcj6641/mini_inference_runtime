@@ -16,18 +16,13 @@ from app.runtime.kv_cache_utils import (
 
 @pytest.mark.integration
 def test_equal_length_batched_prefill_matches_single_prefill(
-    real_runner,
-) -> None:
+        real_runner,
+    ) -> None:
     prompt_a = "The capital of France is"
     prompt_b = "The capital of Germany is"
 
-    input_ids_a_tensor = real_runner.encode_prompt(prompt_a)# 2d tensor
-    input_ids_b_tensor = real_runner.encode_prompt(prompt_b)
-
-
-    #1d list, fit Class Request
     input_ids_a = (
-        input_ids_a_tensor
+        real_runner.encode_prompt(prompt_a)
         .squeeze(0)
         .detach()
         .cpu()
@@ -35,7 +30,7 @@ def test_equal_length_batched_prefill_matches_single_prefill(
     )
 
     input_ids_b = (
-        input_ids_b_tensor
+        real_runner.encode_prompt(prompt_b)
         .squeeze(0)
         .detach()
         .cpu()
@@ -47,11 +42,23 @@ def test_equal_length_batched_prefill_matches_single_prefill(
     request_a = make_request("A", input_ids_a)
     request_b = make_request("B", input_ids_b)
 
-    single_input_ids_a = torch.tensor([input_ids_a], dtype=torch.long)
-    single_input_ids_b = torch.tensor([input_ids_b], dtype=torch.long)
+    single_input_ids_a = torch.tensor(
+        [input_ids_a],
+        dtype=torch.long,
+    )
+    single_input_ids_b = torch.tensor(
+        [input_ids_b],
+        dtype=torch.long,
+    )
 
-    single_attention_mask_a = torch.ones_like(single_input_ids_a, dtype=torch.long)
-    single_attention_mask_b = torch.ones_like(single_input_ids_b, dtype=torch.long)
+    single_attention_mask_a = torch.ones_like(
+        single_input_ids_a,
+        dtype=torch.long,
+    )
+    single_attention_mask_b = torch.ones_like(
+        single_input_ids_b,
+        dtype=torch.long,
+    )
 
     single_a = real_runner.prefill(
         input_ids=single_input_ids_a,
@@ -63,12 +70,14 @@ def test_equal_length_batched_prefill_matches_single_prefill(
         attention_mask=single_attention_mask_b,
     )
 
-    list_of_requests = [request_a, request_b]
-    batch_requests = BatchBuilder().build_equal_length_prefill_batch(
-        list_of_requests
+    requests = [request_a, request_b]
+
+    batch = BatchBuilder().build_prefill_batch(
+        requests,
+        pad_token_id=real_runner.pad_token_id,
     )
 
-    batched_output = real_runner.prefill_batch(batch_requests)
+    batched_output = real_runner.prefill_batch(batch)
 
     assert batched_output.next_token_ids == [
         single_a.next_token_id,
@@ -78,49 +87,64 @@ def test_equal_length_batched_prefill_matches_single_prefill(
     assert batched_output.logits.shape[0] == 2
     assert len(batched_output.next_token_ids) == 2
     assert batched_output.past_key_values is not None
-    assert torch.isfinite(batched_output.logits).all()
+    assert torch.isfinite(
+        batched_output.logits
+    ).all()
 
     request_caches = split_legacy_kv_cache(
         batched_output.past_key_values
     )
 
-    if len(list_of_requests) != len(batched_output.next_token_ids):
-        raise RuntimeError(
-            "Number of next tokens does not match requests"
-        )
+    assert len(request_caches) == 2
 
-    if len(list_of_requests) != len(request_caches):
-        raise RuntimeError(
-            "Number of KV caches does not match requests"
-        )
+    assert (
+        get_kv_sequence_length(request_caches[0])
+        == len(input_ids_a)
+    )
 
-    for request, next_token_id, request_cache in zip(
-        list_of_requests,
-        batched_output.next_token_ids,
+    assert (
+        get_kv_sequence_length(request_caches[1])
+        == len(input_ids_b)
+    )
+
+    # Batched and single-request GPU execution may use
+    # different kernels / accumulation orders in float16.
+    # KV values should therefore be numerically close,
+    # but are not expected to be bitwise identical.
+    for batched_cache, single_output in zip(
         request_caches,
+        [single_a, single_b],
         strict=True,
     ):
-        request.attach_kv_cache(request_cache)
-        request.append_generated_token(next_token_id)
+        assert single_output.past_key_values is not None
 
-    assert request_a.past_key_values is not None
-    assert request_b.past_key_values is not None
+        for (
+            batched_layer,
+            single_layer,
+        ) in zip(
+            batched_cache,
+            single_output.past_key_values,
+            strict=True,
+        ):
+            batched_key, batched_value = batched_layer
+            single_key, single_value = single_layer
 
-    assert request_a.generated_ids == [
-        batched_output.next_token_ids[0]
-    ]
+            assert batched_key.shape == single_key.shape
+            assert batched_value.shape == single_value.shape
 
-    assert request_b.generated_ids == [
-        batched_output.next_token_ids[1]
-    ]
-    assert get_kv_sequence_length(
-        request_a.past_key_values
-    ) == len(request_a.input_ids)
+            assert torch.allclose(
+                batched_key,
+                single_key,
+                atol=1e-2,
+                rtol=1e-2,
+            )
 
-    assert get_kv_sequence_length(
-        request_b.past_key_values
-    ) == len(request_b.input_ids)
-
+            assert torch.allclose(
+                batched_value,
+                single_value,
+                atol=1e-2,
+                rtol=1e-2,
+            )
 
 
 @pytest.mark.integration
@@ -225,8 +249,8 @@ def test_build_variable_length_prefill_batch() -> None:
 
 @pytest.mark.integration
 def test_variable_length_batched_prefill_kv_length(
-    real_runner,
-) -> None:
+        real_runner,
+    ) -> None:
     input_ids_a = (
         real_runner.encode_prompt("Hello")
         .squeeze(0)
@@ -250,7 +274,10 @@ def test_variable_length_batched_prefill_kv_length(
     request_a = make_request("A", input_ids_a)
     request_b = make_request("B", input_ids_b)
 
-    requests = [request_a, request_b]
+    requests = [
+        request_a,
+        request_b,
+    ]
 
     batch = BatchBuilder().build_prefill_batch(
         requests,
@@ -263,35 +290,36 @@ def test_variable_length_batched_prefill_kv_length(
         output.past_key_values
     )
 
-    for request, next_token_id, request_cache in zip(
-        requests,
-        output.next_token_ids,
-        request_caches,
-        strict=True,
-    ):
-        request.attach_kv_cache(request_cache)
-        request.append_generated_token(next_token_id)
+    assert len(request_caches) == 2
 
-    print(
-        "A logical prompt length:",
-        len(request_a.input_ids),
-    )
-    print(
-        "A physical KV length:",
-        get_kv_sequence_length(
-            request_a.past_key_values
-        ),
+    max_prompt_length = max(
+        len(input_ids_a),
+        len(input_ids_b),
     )
 
-    print(
-        "B logical prompt length:",
-        len(request_b.input_ids),
+    # The runner operates on a padded batch, so the raw
+    # KV tensors have the padded sequence length.
+    assert (
+        get_kv_sequence_length(request_caches[0])
+        == max_prompt_length
     )
-    print(
-        "B physical KV length:",
-        get_kv_sequence_length(
-            request_b.past_key_values
-        ),
+
+    assert (
+        get_kv_sequence_length(request_caches[1])
+        == max_prompt_length
+    )
+
+    # But the logical prompt lengths remain unchanged.
+    assert len(request_a.input_ids) == len(input_ids_a)
+    assert len(request_b.input_ids) == len(input_ids_b)
+
+    # Attention mask must identify only real prompt tokens.
+    assert batch.attention_mask[0].sum().item() == len(
+        input_ids_a
+    )
+
+    assert batch.attention_mask[1].sum().item() == len(
+        input_ids_b
     )
 
 @pytest.mark.integration
@@ -371,8 +399,8 @@ def test_stack_and_split_cache_round_trip() -> None:
 
 @pytest.mark.integration
 def test_equal_length_batched_decode_matches_single_prefill(
-    real_runner,
-) -> None:
+        real_runner,
+    ) -> None:
     prompt_a = "The capital of France is"
     prompt_b = "The capital of Germany is"
 

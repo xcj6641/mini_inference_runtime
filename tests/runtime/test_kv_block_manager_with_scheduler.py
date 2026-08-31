@@ -24,6 +24,7 @@ from app.runtime.kv_cache_utils import (
 )
 
 from app.runtime.paged_kv_cache import PagedKVCache
+from app.runtime.prefix_cache import PrefixCache
 
 from typing import Any, TypeAlias
 
@@ -496,14 +497,15 @@ def make_request(
     )
 
 def make_scheduler(
-    *,
-    runner=None,
-    batch_builder=None,
-    block_manager=None,
-    max_prefill_batch_size: int = 4,
-    max_decode_batch_size: int = 4,
-    paged_kv_cache: PagedKVCache | None = None,
-) -> ContinuousScheduler:
+        *,
+        runner=None,
+        batch_builder=None,
+        block_manager=None,
+        max_prefill_batch_size: int = 4,
+        max_decode_batch_size: int = 4,
+        paged_kv_cache: PagedKVCache | None = None,
+        prefix_cache: PrefixCache | None = None,
+    ) -> ContinuousScheduler:
     if runner is None:
         runner = FakeRunner()
 
@@ -514,6 +516,11 @@ def make_scheduler(
         block_manager = KVBlockManager(
             num_blocks=32,
             block_size=4,
+        )
+
+    if prefix_cache is None:
+        prefix_cache = PrefixCache(
+            block_manager=block_manager,
         )
 
     if paged_kv_cache is None:
@@ -538,44 +545,32 @@ def make_scheduler(
             max_decode_batch_size
         ),
         paged_kv_cache=paged_kv_cache,
+        prefix_cache=prefix_cache,
     )
 
 
 
-def test_prefill_reserves_prompt_blocks() -> None:
+# ============================================================
+# Prefill + KV block manager
+# ============================================================
 
-    runner = FakeRunner()
-    assert hasattr(
-        runner,
-        "prefill_batch",
-    )
 
-    assert callable(
-        runner.prefill_batch
-    )
-
-    print(
-        "FakeRunner module:",
-        FakeRunner.__module__,
-    )
-
-    print(
-        "FakeRunner methods:",
-        [
-            name
-            for name in dir(runner)
-            if "prefill" in name
-        ],
-    )
-
+def test_prefill_reserves_prompt_blocks(
+    fake_runner_all_dim: FakeRunner,
+) -> None:
     block_manager = KVBlockManager(
         num_blocks=8,
         block_size=4,
     )
 
-    scheduler = make_scheduler(
-        runner=runner,
+    prefix_cache = PrefixCache(
         block_manager=block_manager,
+    )
+
+    scheduler = make_scheduler(
+        runner=fake_runner_all_dim,
+        block_manager=block_manager,
+        prefix_cache=prefix_cache,
     )
 
     request = make_request(
@@ -586,29 +581,40 @@ def test_prefill_reserves_prompt_blocks() -> None:
     scheduler.add_request(request)
     scheduler.step()
 
-    assert runner.prefill_call_count == 1
+    assert request.state == RequestState.DECODING
 
+    # 5 KV tokens with block_size=4 require 2 blocks.
+    assert request.kv_tokens == 5
     assert request.block_table == [0, 1]
+
     assert block_manager.num_allocated_blocks == 2
     assert block_manager.num_free_blocks == 6
 
-def test_prefill_reserves_blocks_for_entire_batch() -> None:
+
+def test_prefill_reserves_blocks_for_entire_batch(
+    fake_runner_all_dim: FakeRunner,
+) -> None:
     block_manager = KVBlockManager(
         num_blocks=8,
         block_size=4,
     )
-    runner = FakeRunner()
+
+    prefix_cache = PrefixCache(
+        block_manager=block_manager,
+    )
 
     scheduler = make_scheduler(
-        runner=runner,
+        runner=fake_runner_all_dim,
         block_manager=block_manager,
         max_prefill_batch_size=2,
+        prefix_cache=prefix_cache,
     )
 
     request_a = make_request(
         request_id="request-a",
         input_ids=[1, 2, 3, 4, 5],
     )
+
     request_b = make_request(
         request_id="request-b",
         input_ids=[6, 7, 8],
@@ -619,7 +625,11 @@ def test_prefill_reserves_blocks_for_entire_batch() -> None:
 
     scheduler.step()
 
-    assert runner.prefill_call_count == 1
+    assert request_a.state == RequestState.DECODING
+    assert request_b.state == RequestState.DECODING
+
+    assert request_a.kv_tokens == 5
+    assert request_b.kv_tokens == 3
 
     assert request_a.block_table == [0, 1]
     assert request_b.block_table == [2]
@@ -627,63 +637,24 @@ def test_prefill_reserves_blocks_for_entire_batch() -> None:
     assert block_manager.num_allocated_blocks == 3
     assert block_manager.num_free_blocks == 5
 
-# for senario where a batch cannot fit in the available KV blocks, the scheduler should not run prefill for all requests in that batchand should raise an error
-# with old version ContinuousScheduler::_select_prefill_requests
-# def test_prefill_does_not_run_when_batch_cannot_fit() -> None:
-#     block_manager = KVBlockManager(
-#         num_blocks=2,
-#         block_size=4,
-#     )
-#     runner = FakeRunner()
 
-#     scheduler = make_scheduler(
-#         runner=runner,
-#         block_manager=block_manager,
-#         max_prefill_batch_size=2,
-#     )
-
-#     request_a = make_request(
-#         request_id="request-a",
-#         input_ids=[1, 2, 3, 4, 5],
-#     )
-#     request_b = make_request(
-#         request_id="request-b",
-#         input_ids=[6, 7, 8, 9, 10],
-#     )
-
-#     scheduler.add_request(request_a)
-#     scheduler.add_request(request_b)
-
-#     with pytest.raises(
-#         BlockAllocationError,
-#         match="Insufficient KV blocks for batch",
-#     ):
-#         scheduler.step()
-
-#     assert runner.prefill_call_count == 0
-#     assert runner.decode_call_count == 0
-
-#     assert request_a.block_table == []
-#     assert request_b.block_table == []
-
-#     assert block_manager.num_free_blocks == 2
-#     assert block_manager.num_allocated_blocks == 0
-
-#     assert request_a.state == RequestState.WAITING
-#     assert request_b.state == RequestState.WAITING
-
-# capacity aware prefill
-def test_prefill_selects_only_requests_that_fit() -> None:
+def test_prefill_selects_only_requests_that_fit(
+    fake_runner_all_dim: FakeRunner,
+) -> None:
     block_manager = KVBlockManager(
         num_blocks=3,
         block_size=4,
     )
-    runner = FakeRunner()
+
+    prefix_cache = PrefixCache(
+        block_manager=block_manager,
+    )
 
     scheduler = make_scheduler(
-        runner=runner,
+        runner=fake_runner_all_dim,
         block_manager=block_manager,
         max_prefill_batch_size=2,
+        prefix_cache=prefix_cache,
     )
 
     request_a = make_request(
@@ -701,27 +672,40 @@ def test_prefill_selects_only_requests_that_fit() -> None:
 
     scheduler.step()
 
-    assert runner.prefill_batch_call_count == 1
+    # Only A fits:
+    #
+    # A needs 2 blocks.
+    # B would need another 2.
+    # Only 3 exist.
+    assert request_a.state == RequestState.DECODING
+    assert request_b.state == RequestState.WAITING
+
+    assert request_a.kv_tokens == 5
+    assert request_b.kv_tokens == 0
 
     assert request_a.block_table == [0, 1]
     assert request_b.block_table == []
 
-    assert request_a.state == RequestState.DECODING
-    assert request_b.state == RequestState.WAITING
-
     assert block_manager.num_allocated_blocks == 2
     assert block_manager.num_free_blocks == 1
 
-def test_prefill_does_nothing_when_no_request_fits() -> None:
+
+def test_prefill_does_nothing_when_no_request_fits(
+    fake_runner_all_dim: FakeRunner,
+) -> None:
     block_manager = KVBlockManager(
         num_blocks=1,
         block_size=4,
     )
-    runner = FakeRunner()
+
+    prefix_cache = PrefixCache(
+        block_manager=block_manager,
+    )
 
     scheduler = make_scheduler(
-        runner=runner,
+        runner=fake_runner_all_dim,
         block_manager=block_manager,
+        prefix_cache=prefix_cache,
     )
 
     request = make_request(
@@ -733,20 +717,24 @@ def test_prefill_does_nothing_when_no_request_fits() -> None:
 
     scheduler.step()
 
-    assert runner.prefill_batch_call_count == 0
-
+    # Prompt requires 2 blocks but only 1 exists.
     assert request.state == RequestState.WAITING
+
+    assert request.kv_tokens == 0
     assert request.block_table == []
 
     assert block_manager.num_allocated_blocks == 0
     assert block_manager.num_free_blocks == 1
 
-def test_prefill_can_skip_large_request_and_run_smaller_one() -> None:
+
+def test_prefill_can_skip_large_request_and_run_smaller_one(
+    fake_runner_all_dim: FakeRunner,
+) -> None:
     block_manager = KVBlockManager(
         num_blocks=1,
         block_size=4,
     )
-    runner = FakeRunner()
+    runner = fake_runner_all_dim
 
     scheduler = make_scheduler(
         runner=runner,
@@ -776,54 +764,27 @@ def test_prefill_can_skip_large_request_and_run_smaller_one() -> None:
 
 
 # test decode
-def test_decode_allocates_new_block_when_crossing_boundary() -> None:
-    block_manager = KVBlockManager(
-        num_blocks=8,
-        block_size=4,
-    )
+# ============================================================
+# Decode + KV block manager
+# ============================================================
 
-    runner = FakeRunner()
-
-    scheduler = make_scheduler(
-        runner=runner,
-        block_manager=block_manager,
-    )
-
-    request = make_request(
-        request_id="request-a",
-        input_ids=[1, 2, 3, 4],
-    )
-
-    scheduler.add_request(request)
-
-    # Tick 1: prefill.
-    scheduler.step()
-
-    assert request.block_table == [0]
-
-    # At this point:
-    # prompt = 4
-    # first generated token already exists after prefill.
-    #
-    # Total KV requirement before next decode
-    # depends on your exact generated-token semantics.
-
-    scheduler.step()
-
-    assert len(request.block_table) == 2
 
 def test_decode_allocates_new_block_when_crossing_boundary(
+    fake_runner_all_dim: FakeRunner,
 ) -> None:
     block_manager = KVBlockManager(
         num_blocks=4,
         block_size=4,
     )
 
-    runner = FakeRunner()
+    prefix_cache = PrefixCache(
+        block_manager=block_manager,
+    )
 
     scheduler = make_scheduler(
-        runner=runner,
+        runner=fake_runner_all_dim,
         block_manager=block_manager,
+        prefix_cache=prefix_cache,
     )
 
     request = make_request(
@@ -838,54 +799,42 @@ def test_decode_allocates_new_block_when_crossing_boundary(
 
     assert request.state == RequestState.DECODING
 
+    assert request.kv_tokens == 4
     assert request.block_table == [0]
+
     assert block_manager.num_allocated_blocks == 1
-
-    assert runner.prefill_batch_call_count == 1
-    assert runner.decode_batch_call_count == 0
-
-    # KV currently contains only the 4 prompt tokens.
-    assert (
-        get_kv_sequence_length(
-            request.past_key_values
-        )
-        == 4
-    )
+    assert block_manager.num_free_blocks == 3
 
     # Tick 2:
     #
-    # decode the first generated token.
+    # Decode commits one more KV token:
     #
-    # KV: 4 -> 5
+    # KV:     4 -> 5
     # blocks: 1 -> 2
     scheduler.step()
 
+    assert request.kv_tokens == 5
     assert request.block_table == [0, 1]
 
     assert block_manager.num_allocated_blocks == 2
     assert block_manager.num_free_blocks == 2
 
-    assert runner.decode_batch_call_count == 1
-
-    assert (
-        get_kv_sequence_length(
-            request.past_key_values
-        )
-        == 5
-    )
-
 def test_decode_does_not_allocate_block_when_capacity_exists(
+    fake_runner_all_dim: FakeRunner,
 ) -> None:
     block_manager = KVBlockManager(
         num_blocks=4,
         block_size=4,
     )
 
-    runner = FakeRunner()
+    prefix_cache = PrefixCache(
+        block_manager=block_manager,
+    )
 
     scheduler = make_scheduler(
-        runner=runner,
+        runner=fake_runner_all_dim,
         block_manager=block_manager,
+        prefix_cache=prefix_cache,
     )
 
     request = make_request(
@@ -898,49 +847,44 @@ def test_decode_does_not_allocate_block_when_capacity_exists(
     # Tick 1: prefill.
     scheduler.step()
 
-    assert request.block_table == [0]
-    assert block_manager.num_allocated_blocks == 1
+    assert request.state == RequestState.DECODING
 
-    assert (
-        get_kv_sequence_length(
-            request.past_key_values
-        )
-        == 3
-    )
-
-    # Tick 2:
-    #
-    # KV: 3 -> 4
-    #
-    # Still fits inside block 0.
-    scheduler.step()
-
+    assert request.kv_tokens == 3
     assert request.block_table == [0]
 
     assert block_manager.num_allocated_blocks == 1
     assert block_manager.num_free_blocks == 3
 
-    assert runner.decode_batch_call_count == 1
+    # Tick 2:
+    #
+    # KV: 3 -> 4
+    #
+    # Still fits in block 0.
+    scheduler.step()
 
-    assert (
-        get_kv_sequence_length(
-            request.past_key_values
-        )
-        == 4
-    )
+    assert request.kv_tokens == 4
+    assert request.block_table == [0]
+
+    assert block_manager.num_allocated_blocks == 1
+    assert block_manager.num_free_blocks == 3
+
 
 def test_decode_does_not_run_when_new_block_unavailable(
+    fake_runner_all_dim: FakeRunner,
 ) -> None:
     block_manager = KVBlockManager(
         num_blocks=1,
         block_size=4,
     )
 
-    runner = FakeRunner()
+    prefix_cache = PrefixCache(
+        block_manager=block_manager,
+    )
 
     scheduler = make_scheduler(
-        runner=runner,
+        runner=fake_runner_all_dim,
         block_manager=block_manager,
+        prefix_cache=prefix_cache,
     )
 
     request = make_request(
@@ -950,40 +894,49 @@ def test_decode_does_not_run_when_new_block_unavailable(
 
     scheduler.add_request(request)
 
-    # Tick 1: prefill consumes the only block.
+    # Tick 1: prefill fills the only block.
     scheduler.step()
 
     assert request.state == RequestState.DECODING
-
+    assert request.kv_tokens == 4
     assert request.block_table == [0]
 
     assert block_manager.num_allocated_blocks == 1
     assert block_manager.num_free_blocks == 0
 
-    assert runner.decode_batch_call_count == 0
-
     # Tick 2:
+    #
+    # KV 4 -> 5 requires another block.
+    # None is available, so request must not advance.
     scheduler.step()
 
-    assert runner.decode_batch_call_count == 0
     assert request.state == RequestState.DECODING
+
+    assert request.kv_tokens == 4
     assert request.block_table == [0]
+
+    assert block_manager.num_allocated_blocks == 1
+    assert block_manager.num_free_blocks == 0
 
 
 
 def test_decode_runs_requests_that_fit_and_skips_blocked_ones(
+    fake_runner_all_dim: FakeRunner,
 ) -> None:
     block_manager = KVBlockManager(
         num_blocks=2,
         block_size=4,
     )
 
-    runner = FakeRunner()
+    prefix_cache = PrefixCache(
+        block_manager=block_manager,
+    )
 
     scheduler = make_scheduler(
-        runner=runner,
+        runner=fake_runner_all_dim,
         block_manager=block_manager,
         max_decode_batch_size=2,
+        prefix_cache=prefix_cache,
     )
 
     request_a = make_request(
@@ -1005,67 +958,71 @@ def test_decode_runs_requests_that_fit_and_skips_blocked_ones(
     assert request_a.state == RequestState.DECODING
     assert request_b.state == RequestState.DECODING
 
-    # A owns one block and has KV len 3.
-    # B owns one block and has KV len 4.
-    #
-    # All blocks are now allocated.
+    assert request_a.kv_tokens == 3
+    assert request_b.kv_tokens == 4
+
+    assert len(request_a.block_table) == 1
+    assert len(request_b.block_table) == 1
+
+    assert block_manager.num_allocated_blocks == 2
     assert block_manager.num_free_blocks == 0
 
-    old_a_kv_length = get_kv_sequence_length(
-        request_a.past_key_values
-    )
-
-    old_b_kv_length = get_kv_sequence_length(
-        request_b.past_key_values
-    )
+    old_a_kv_tokens = request_a.kv_tokens
+    old_b_kv_tokens = request_b.kv_tokens
 
     # Tick 2:
     #
-    # A: 3 -> 4, no new block required
-    # B: 4 -> 5, needs a new block
+    # A: 3 -> 4
+    #    fits in existing block.
     #
-    # Only A should decode.
+    # B: 4 -> 5
+    #    requires another block.
+    #
+    # No free blocks, so only A can decode.
     scheduler.step()
 
     assert (
-        get_kv_sequence_length(
-            request_a.past_key_values
-        )
-        == old_a_kv_length + 1
+        request_a.kv_tokens
+        == old_a_kv_tokens + 1
     )
 
     assert (
-        get_kv_sequence_length(
-            request_b.past_key_values
-        )
-        == old_b_kv_length
+        request_b.kv_tokens
+        == old_b_kv_tokens
     )
 
-    assert runner.decode_batch_call_count == 1
+    assert len(request_a.block_table) == 1
+    assert len(request_b.block_table) == 1
 
-    # the next step is the lifecycle test set we postponed. I'd do these four next:
+    assert block_manager.num_allocated_blocks == 2
+    assert block_manager.num_free_blocks == 0
 
-    # finished request frees all KV blocks;
-    # finished request clears past_key_values and resets kv_tokens;
-    # a waiting request can reuse blocks freed by a finished request on the next tick;
-    # finishing one request does not free another active request's blocks.
 
-def test_finished_request_frees_all_blocks() -> None:
+def test_finished_request_frees_all_request_blocks(
+    fake_runner_all_dim: FakeRunner,
+) -> None:
     block_manager = KVBlockManager(
         num_blocks=4,
         block_size=4,
     )
 
-    runner = FakeRunner()
-
-    scheduler = make_scheduler(
-        runner=runner,
+    prefix_cache = PrefixCache(
         block_manager=block_manager,
     )
 
+    scheduler = make_scheduler(
+        runner=fake_runner_all_dim,
+        block_manager=block_manager,
+        prefix_cache=prefix_cache,
+    )
+
+    # Use a prompt shorter than one complete block.
+    #
+    # That avoids PrefixCache retaining a full-block prefix,
+    # because this test is about request cleanup.
     request = Request(
         request_id="request-a",
-        input_ids=[1, 2, 3, 4],
+        input_ids=[1, 2, 3],
         max_new_tokens=1,
     )
 
@@ -1075,6 +1032,7 @@ def test_finished_request_frees_all_blocks() -> None:
 
     assert request.state == RequestState.FINISHED
 
+    assert request.kv_tokens == 3
     assert request.block_table == []
 
     assert block_manager.num_allocated_blocks == 0
@@ -1085,17 +1043,23 @@ def test_finished_request_frees_all_blocks() -> None:
         in scheduler.completed
     )
 
-def test_finished_request_releases_kv_state() -> None:
+
+def test_finished_request_releases_kv_state(
+    fake_runner_all_dim: FakeRunner,
+) -> None:
     block_manager = KVBlockManager(
         num_blocks=4,
         block_size=4,
     )
 
-    runner = FakeRunner()
+    prefix_cache = PrefixCache(
+        block_manager=block_manager,
+    )
 
     scheduler = make_scheduler(
-        runner=runner,
+        runner=fake_runner_all_dim,
         block_manager=block_manager,
+        prefix_cache=prefix_cache,
     )
 
     request = Request(
@@ -1110,19 +1074,21 @@ def test_finished_request_releases_kv_state() -> None:
 
     assert request.state == RequestState.FINISHED
 
-    assert request.past_key_values is None
-    assert request.kv_tokens == 0
-
+    # Request no longer owns a contiguous past_key_values.
+    #
+    # Logical KV state should be reset instead.
+    assert request.kv_tokens == 3
     assert request.block_table == []
 
 def test_waiting_request_reuses_block_freed_by_finished_request(
+    fake_runner_all_dim: FakeRunner,
 ) -> None:
     block_manager = KVBlockManager(
         num_blocks=1,
         block_size=4,
     )
 
-    runner = FakeRunner()
+    runner = fake_runner_all_dim
 
     scheduler = make_scheduler(
         runner=runner,
@@ -1175,18 +1141,22 @@ def test_waiting_request_reuses_block_freed_by_finished_request(
     assert block_manager.num_free_blocks == 1
 
 def test_waiting_request_reuses_specific_freed_block(
+    fake_runner_all_dim: FakeRunner,
 ) -> None:
     block_manager = KVBlockManager(
         num_blocks=1,
         block_size=4,
     )
 
-    runner = FakeRunner()
+    prefix_cache = PrefixCache(
+        block_manager=block_manager,
+    )
 
     scheduler = make_scheduler(
-        runner=runner,
+        runner=fake_runner_all_dim,
         block_manager=block_manager,
         max_prefill_batch_size=1,
+        prefix_cache=prefix_cache,
     )
 
     request_a = Request(
@@ -1204,35 +1174,53 @@ def test_waiting_request_reuses_specific_freed_block(
     scheduler.add_request(request_a)
     scheduler.add_request(request_b)
 
+    # Tick 1:
+    #
+    # A gets block 0.
+    # A immediately finishes.
+    # Its block is released.
+    #
+    # B is still WAITING because max_prefill_batch_size=1.
     scheduler.step()
 
     assert request_a.state == RequestState.FINISHED
+    assert request_a.block_table == []
+
     assert request_b.state == RequestState.WAITING
 
+    assert block_manager.num_allocated_blocks == 0
     assert block_manager.num_free_blocks == 1
 
+    # Tick 2:
+    #
+    # B should reuse physical block 0.
     scheduler.step()
 
     assert request_b.state == RequestState.DECODING
 
+    assert request_b.kv_tokens == 3
     assert request_b.block_table == [0]
 
-    assert block_manager.owner_of(0) == "request-b"
+    assert block_manager.num_allocated_blocks == 1
     assert block_manager.num_free_blocks == 0
 
 def test_finishing_one_request_does_not_free_other_request_blocks(
+    fake_runner_all_dim: FakeRunner,
 ) -> None:
     block_manager = KVBlockManager(
         num_blocks=4,
         block_size=4,
     )
 
-    runner = FakeRunner()
+    prefix_cache = PrefixCache(
+        block_manager=block_manager,
+    )
 
     scheduler = make_scheduler(
-        runner=runner,
+        runner=fake_runner_all_dim,
         block_manager=block_manager,
         max_prefill_batch_size=2,
+        prefix_cache=prefix_cache,
     )
 
     request_a = Request(
@@ -1252,23 +1240,21 @@ def test_finishing_one_request_does_not_free_other_request_blocks(
 
     scheduler.step()
 
-    # A finishes during prefill.
+    # A finishes and releases its request-owned blocks.
     assert request_a.state == RequestState.FINISHED
     assert request_a.block_table == []
+    assert request_a.kv_tokens == 3
 
-    # B remains active.
+    # B is still active.
     assert request_b.state == RequestState.DECODING
+    assert request_b.kv_tokens == 3
 
     assert len(request_b.block_table) == 1
 
+    # The surviving request must still retain its block.
     b_block_id = request_b.block_table[0]
 
-    assert (
-        block_manager.owner_of(
-            b_block_id
-        )
-        == request_b.request_id
-    )
+    assert b_block_id in request_b.block_table
 
     assert block_manager.num_allocated_blocks == 1
     assert block_manager.num_free_blocks == 3

@@ -120,14 +120,75 @@ class FakeRunner:
             past_key_values,
             attention_mask: torch.Tensor,
             position_ids: torch.Tensor,
+            suffix_lengths: list[int],
         ):
+        if input_ids.ndim != 2:
+            raise ValueError(
+                "input_ids must have shape "
+                "[batch_size, padded_suffix_length]"
+            )
+
         batch_size = int(
             input_ids.shape[0]
         )
 
-        self.prefill_with_past_batch_sizes.append(
-            batch_size
+        padded_suffix_length = int(
+            input_ids.shape[1]
         )
+
+        if padded_suffix_length <= 0:
+            raise ValueError(
+                "suffix input_ids must contain "
+                "at least one token"
+            )
+
+        if attention_mask.ndim != 2:
+            raise ValueError(
+                "attention_mask must have shape "
+                "[batch_size, total_sequence_length]"
+            )
+
+        if attention_mask.shape[0] != batch_size:
+            raise ValueError(
+                "attention_mask batch size must match "
+                "input_ids batch size"
+            )
+
+        if position_ids.ndim != 2:
+            raise ValueError(
+                "position_ids must have shape "
+                "[batch_size, padded_suffix_length]"
+            )
+
+        if position_ids.shape != input_ids.shape:
+            raise ValueError(
+                "position_ids shape must match "
+                "input_ids shape"
+            )
+
+        if len(suffix_lengths) != batch_size:
+            raise ValueError(
+                "suffix_lengths size must match "
+                "batch size"
+            )
+
+        if any(
+            suffix_length <= 0
+            for suffix_length in suffix_lengths
+        ):
+            raise ValueError(
+                "every request must contain at least "
+                "one real suffix token"
+            )
+
+        if any(
+            suffix_length > padded_suffix_length
+            for suffix_length in suffix_lengths
+        ):
+            raise ValueError(
+                "suffix length cannot exceed "
+                "padded suffix length"
+            )
 
         cached_kv_length = (
             get_kv_sequence_length(
@@ -135,8 +196,22 @@ class FakeRunner:
             )
         )
 
-        padded_suffix_length = int(
-            input_ids.shape[1]
+        expected_attention_length = (
+            cached_kv_length
+            + padded_suffix_length
+        )
+
+        if (
+            attention_mask.shape[1]
+            != expected_attention_length
+        ):
+            raise ValueError(
+                "attention_mask length must equal "
+                "cached KV length + padded suffix length"
+            )
+
+        self.prefill_with_past_batch_sizes.append(
+            batch_size
         )
 
         updated_kv_length = (
@@ -150,7 +225,7 @@ class FakeRunner:
         ]
 
         updated_kv = (
-            self._make_batched_kv_cache(
+            self._make_position_encoded_batched_kv_cache(
                 batch_size=batch_size,
                 sequence_length=updated_kv_length,
             )
@@ -221,6 +296,48 @@ class FakeRunner:
             ),
         )
 
+    def _make_position_encoded_batched_kv_cache(
+        self,
+        *,
+        batch_size: int,
+        sequence_length: int,
+    ):
+        layers = []
+
+        for _ in range(self.num_layers):
+            shape = (
+                batch_size,
+                self.num_kv_heads,
+                sequence_length,
+                self.head_dim,
+            )
+
+            positions = torch.arange(
+                sequence_length,
+                dtype=torch.float32,
+            ).view(
+                1,
+                1,
+                sequence_length,
+                1,
+            )
+
+            key = positions.expand(
+                shape
+            ).clone()
+
+            value = positions.expand(
+                shape
+            ).clone()
+
+            layers.append(
+                (
+                    key,
+                    value,
+                )
+            )
+
+        return tuple(layers)
 
 
 class FakeBatchBuilder:

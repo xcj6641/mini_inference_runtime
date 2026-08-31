@@ -1744,6 +1744,7 @@ def test_freed_paged_kv_blocks_can_be_reused_without_stale_data() -> None:
     # -------------------------
     # Request A
     # -------------------------
+
     request_a = make_request(
         request_id="A",
         input_ids=[1, 2, 3],
@@ -1756,7 +1757,11 @@ def test_freed_paged_kv_blocks_can_be_reused_without_stale_data() -> None:
 
     assert len(request_a.block_table) == 1
 
-    blocks_a = list(request_a.block_table)
+    blocks_a = list(
+        request_a.block_table
+    )
+
+    assert blocks_a == [0]
 
     key_a = torch.tensor(
         [[[
@@ -1776,7 +1781,9 @@ def test_freed_paged_kv_blocks_can_be_reused_without_stale_data() -> None:
 
     paged_kv_cache.write_request_kv(
         block_table=request_a.block_table,
-        past_key_values=((key_a, value_a),),
+        past_key_values=(
+            (key_a, value_a),
+        ),
         num_tokens=3,
         source_start=0,
     )
@@ -1799,22 +1806,47 @@ def test_freed_paged_kv_blocks_can_be_reused_without_stale_data() -> None:
     )
 
     # -------------------------
-    # A finishes: free blocks
+    # A finishes: release blocks
     # -------------------------
-    freed_blocks = block_manager.free(
-        request_a
+
+    # release_blocks() expects physical block IDs,
+    # not request IDs.
+    block_manager.release_blocks(
+        blocks_a
     )
 
-    assert freed_blocks == blocks_a
+    # Request-side lifecycle cleanup is separate.
+    request_a.block_table.clear()
+
     assert request_a.block_table == []
 
+    assert (
+        block_manager.num_allocated_blocks
+        == 0
+    )
+    assert (
+        block_manager.num_free_blocks
+        == 1
+    )
+
     # Note:
-    # PagedKVCache may still physically contain A's old bytes.
-    # We do NOT need to zero them here.
+    #
+    # PagedKVCache may still physically contain
+    # A's old bytes in block 0.
+    #
+    # That is fine.
+    #
+    # Correctness requires that the next owner:
+    #
+    #   1. writes its valid KV positions
+    #   2. materializes only its valid token count
+    #
+    # We do NOT need to zero freed blocks.
 
     # -------------------------
     # Request B
     # -------------------------
+
     request_b = make_request(
         request_id="B",
         input_ids=[4, 5],
@@ -1827,11 +1859,14 @@ def test_freed_paged_kv_blocks_can_be_reused_without_stale_data() -> None:
 
     assert len(request_b.block_table) == 1
 
-    blocks_b = list(request_b.block_table)
+    blocks_b = list(
+        request_b.block_table
+    )
 
-    # If your free-list returns newly freed blocks
-    # deterministically, this should be the same block.
+    # There is only one physical block,
+    # therefore B must reuse block 0.
     assert blocks_b == blocks_a
+    assert blocks_b == [0]
 
     key_b = torch.tensor(
         [[[
@@ -1849,7 +1884,9 @@ def test_freed_paged_kv_blocks_can_be_reused_without_stale_data() -> None:
 
     paged_kv_cache.write_request_kv(
         block_table=request_b.block_table,
-        past_key_values=((key_b, value_b),),
+        past_key_values=(
+            (key_b, value_b),
+        ),
         num_tokens=2,
         source_start=0,
     )
@@ -1864,6 +1901,7 @@ def test_freed_paged_kv_blocks_can_be_reused_without_stale_data() -> None:
     # -------------------------
     # B must see only B's KV
     # -------------------------
+
     torch.testing.assert_close(
         restored_b[0][0],
         key_b,
@@ -1874,5 +1912,12 @@ def test_freed_paged_kv_blocks_can_be_reused_without_stale_data() -> None:
         value_b,
     )
 
-    assert restored_b[0][0].shape[2] == 2
-    assert restored_b[0][1].shape[2] == 2
+    assert (
+        restored_b[0][0].shape[2]
+        == 2
+    )
+
+    assert (
+        restored_b[0][1].shape[2]
+        == 2
+    )

@@ -59,10 +59,10 @@ class PagedKVCache:
         )
 
     def get_physical_location(
-        self,
-        block_table: list[int],
-        token_index: int,
-    ) -> tuple[int, int]:
+            self,
+            block_table: list[int],
+            token_index: int,
+        ) -> tuple[int, int]:
         if token_index < 0:
             raise ValueError("token_index must be non-negative")
 
@@ -80,14 +80,14 @@ class PagedKVCache:
         return physical_block_id, slot_index
 
     def write_request_kv_prefix_cache(
-        self,
-        *,
-        block_table: list[int],
-        past_key_values,
-        num_tokens: int,
-        source_start: int = 0,
-        destination_start=0,
-    ) -> None:
+            self,
+            *,
+            block_table: list[int],
+            past_key_values,
+            num_tokens: int,
+            source_start: int = 0,
+            destination_start=0,
+        ) -> None:
         if num_tokens < 0:
             raise ValueError("num_tokens must be non-negative")
 
@@ -185,13 +185,13 @@ class PagedKVCache:
 
 
     def write_request_kv(
-        self,
-        *,
-        block_table: list[int],
-        past_key_values,
-        num_tokens: int,
-        source_start: int = 0,
-    ) -> None:
+            self,
+            *,
+            block_table: list[int],
+            past_key_values,
+            num_tokens: int,
+            source_start: int = 0,
+        ) -> None:
         if num_tokens < 0:
             raise ValueError("num_tokens must be non-negative")
 
