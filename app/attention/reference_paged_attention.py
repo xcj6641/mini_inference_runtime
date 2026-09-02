@@ -215,3 +215,142 @@ def paged_attention_reference(
         )
         outputs.append(head_output)
     return torch.stack(outputs, dim=0,)
+
+def read_paged_kv_token_from_cache(
+        paged_kv_cache,
+        block_table: list[int],
+        layer_index: int,
+        token_index: int,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+    if token_index < 0:
+        raise ValueError(
+            "token_index must be non-negative"
+        )
+
+    block_size = paged_kv_cache.block_size
+
+    logical_block = (
+        token_index // block_size
+    )
+
+    block_offset = (
+        token_index % block_size
+    )
+
+    if logical_block >= len(block_table):
+        raise ValueError(
+            "token_index is outside the block table"
+        )
+
+    physical_block = block_table[
+        logical_block
+    ]
+
+    key = paged_kv_cache.key_cache[
+        layer_index,
+        physical_block,
+        :,
+        block_offset,
+        :,
+    ]
+
+    value = paged_kv_cache.value_cache[
+        layer_index,
+        physical_block,
+        :,
+        block_offset,
+        :,
+    ]
+
+    return key, value
+
+def paged_attention_reference_from_cache(
+        query: torch.Tensor,
+        paged_kv_cache: PagedKVCache,
+        block_table: list[int],
+        layer_index: int,
+        seq_len: int,
+    ) -> torch.Tensor:
+    """
+    Reference decode attention using the real PagedKVCache.
+
+    Shapes:
+        query:
+            [num_attention_heads, head_dim]
+
+        PagedKVCache:
+            [num_layers,
+             num_blocks,
+             num_kv_heads,
+             block_size,
+             head_dim]
+
+    Returns:
+        [num_attention_heads, head_dim]
+    """
+    if seq_len <= 0:
+        raise ValueError(
+            "seq_len must be positive"
+        )
+
+    keys = []
+    values = []
+
+    for token_index in range(seq_len):
+        key, value = read_paged_kv_token_from_cache(
+            paged_kv_cache=paged_kv_cache,
+            block_table=block_table,
+            layer_index=layer_index,
+            token_index=token_index,
+        )
+
+        keys.append(key)
+        values.append(value)
+
+    # [seq_len, num_kv_heads, head_dim]
+    key = torch.stack(
+        keys,
+        dim=0,
+    )
+
+    value = torch.stack(
+        values,
+        dim=0,
+    )
+
+    num_attention_heads = query.shape[0]
+    num_kv_heads = key.shape[1]
+
+    if num_attention_heads % num_kv_heads != 0:
+        raise ValueError(
+            "num_attention_heads must be divisible "
+            "by num_kv_heads"
+        )
+
+    num_queries_per_kv_head = (
+        num_attention_heads // num_kv_heads
+    )
+
+    outputs = []
+
+    for attention_head_index in range(
+        num_attention_heads
+    ):
+        kv_head_index = (
+            attention_head_index
+            // num_queries_per_kv_head
+        )
+
+        head_output = contiguous_attention_reference(
+            query=query[attention_head_index],
+            key=key[:, kv_head_index, :],
+            value=value[:, kv_head_index, :],
+        )
+
+        outputs.append(head_output)
+
+    return torch.stack(
+        outputs,
+        dim=0,
+    )
+
