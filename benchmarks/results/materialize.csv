@@ -1,0 +1,2 @@
+seq_len,kv_size_mib,materialize_median_ms,effective_gbps,num_layers,num_kv_heads,head_dim,block_size,dtype,warmup_iters,benchmark_iters,mean_ms,min_ms,max_ms
+128,1.5,163.69356536865234,0.00960858782969124,24,2,64,16,torch.float16,10,50,164.16302795410155,162.2835235595703,170.4120330810547

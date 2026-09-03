@@ -1,0 +1,2 @@
+seq_len,num_layers,num_kv_heads,head_dim,block_size,dtype,warmup_iters,benchmark_iters,mean_ms,median_ms,min_ms,max_ms
+128,24,2,64,16,torch.float16,10,50,167.88034057617188,165.96018981933594,164.20761108398438,173.16659545898438

@@ -1,0 +1,88 @@
+2026-09-02 21:29:25 PDT | INFO | -- Materialization correctness check
+2026-09-02 21:29:25 PDT | INFO | seq_len: 128
+2026-09-02 21:29:25 PDT | INFO | required_blocks: 8
+2026-09-02 21:29:25 PDT | INFO | block_table: [0, 1, 2, 3, 4, 5, 6, 7]
+2026-09-02 21:29:25 PDT | INFO | original K shape: torch.Size([1, 2, 128, 64])
+2026-09-02 21:29:25 PDT | INFO | materialized K shape: torch.Size([1, 2, 128, 64])
+2026-09-02 21:29:25 PDT | INFO | materialized V shape: torch.Size([1, 2, 128, 64])
+2026-09-02 21:29:25 PDT | INFO | Materialization correctness check passed.
+2026-09-02 21:29:35 PDT | INFO | -- Materialization benchmark
+2026-09-02 21:29:35 PDT | INFO | warmup iterations: 10
+2026-09-02 21:29:35 PDT | INFO | benchmark iterations: 50
+2026-09-02 21:29:35 PDT | INFO | mean latency: 167.880 ms
+2026-09-02 21:29:35 PDT | INFO | median latency: 165.960 ms
+2026-09-02 21:29:35 PDT | INFO | min latency: 164.208 ms
+2026-09-02 21:29:35 PDT | INFO | max latency: 173.167 ms
+2026-09-02 21:29:35 PDT | INFO | Benchmark result logged to CSV: benchmarks/results/materialize.csv
+2026-09-02 21:55:19 PDT | INFO | -- Materialization correctness check
+2026-09-02 21:55:19 PDT | INFO | seq_len: 128
+2026-09-02 21:55:19 PDT | INFO | required_blocks: 8
+2026-09-02 21:55:19 PDT | INFO | block_table: [0, 1, 2, 3, 4, 5, 6, 7]
+2026-09-02 21:55:19 PDT | INFO | original K shape: torch.Size([1, 2, 128, 64])
+2026-09-02 21:55:19 PDT | INFO | materialized K shape: torch.Size([1, 2, 128, 64])
+2026-09-02 21:55:19 PDT | INFO | materialized V shape: torch.Size([1, 2, 128, 64])
+2026-09-02 21:55:19 PDT | INFO | Materialization correctness check passed.
+2026-09-02 21:55:29 PDT | INFO | -- Materialization benchmark
+2026-09-02 21:55:29 PDT | INFO | warmup iterations: 10
+2026-09-02 21:55:29 PDT | INFO | benchmark iterations: 50
+2026-09-02 21:55:29 PDT | INFO | mean latency: 166.782 ms
+2026-09-02 21:55:29 PDT | INFO | median latency: 166.695 ms
+2026-09-02 21:55:29 PDT | INFO | min latency: 165.499 ms
+2026-09-02 21:55:29 PDT | INFO | max latency: 169.044 ms
+2026-09-02 21:55:29 PDT | INFO | KV size: 1.500 MiB
+2026-09-02 21:55:29 PDT | INFO | Effective bandwidth: 0.009 GB/s
+2026-09-02 21:55:29 PDT | INFO | Benchmark result logged to CSV: benchmarks/results/materialize.csv
+2026-09-02 21:56:23 PDT | INFO | -- Materialization correctness check
+2026-09-02 21:56:23 PDT | INFO | seq_len: 128
+2026-09-02 21:56:23 PDT | INFO | required_blocks: 8
+2026-09-02 21:56:23 PDT | INFO | block_table: [0, 1, 2, 3, 4, 5, 6, 7]
+2026-09-02 21:56:23 PDT | INFO | original K shape: torch.Size([1, 2, 128, 64])
+2026-09-02 21:56:23 PDT | INFO | materialized K shape: torch.Size([1, 2, 128, 64])
+2026-09-02 21:56:23 PDT | INFO | materialized V shape: torch.Size([1, 2, 128, 64])
+2026-09-02 21:56:23 PDT | INFO | Materialization correctness check passed.
+2026-09-02 21:56:33 PDT | INFO | -- Materialization benchmark
+2026-09-02 21:56:33 PDT | INFO | warmup iterations: 10
+2026-09-02 21:56:33 PDT | INFO | benchmark iterations: 50
+2026-09-02 21:56:33 PDT | INFO | mean latency: 164.118 ms
+2026-09-02 21:56:33 PDT | INFO | median latency: 163.806 ms
+2026-09-02 21:56:33 PDT | INFO | min latency: 163.080 ms
+2026-09-02 21:56:33 PDT | INFO | max latency: 169.175 ms
+2026-09-02 21:56:33 PDT | INFO | KV size: 1.500 MiB
+2026-09-02 21:56:33 PDT | INFO | Effective bandwidth: 0.010 GB/s
+2026-09-02 21:56:33 PDT | INFO | Benchmark result logged to CSV: benchmarks/results/materialize.csv
+2026-09-02 22:00:43 PDT | INFO | -- Materialization correctness check
+2026-09-02 22:00:43 PDT | INFO | seq_len: 128
+2026-09-02 22:00:43 PDT | INFO | required_blocks: 8
+2026-09-02 22:00:43 PDT | INFO | block_table: [0, 1, 2, 3, 4, 5, 6, 7]
+2026-09-02 22:00:43 PDT | INFO | original K shape: torch.Size([1, 2, 128, 64])
+2026-09-02 22:00:43 PDT | INFO | materialized K shape: torch.Size([1, 2, 128, 64])
+2026-09-02 22:00:43 PDT | INFO | materialized V shape: torch.Size([1, 2, 128, 64])
+2026-09-02 22:00:43 PDT | INFO | Materialization correctness check passed.
+2026-09-02 22:00:52 PDT | INFO | -- Materialization benchmark
+2026-09-02 22:00:52 PDT | INFO | warmup iterations: 10
+2026-09-02 22:00:52 PDT | INFO | benchmark iterations: 50
+2026-09-02 22:00:52 PDT | INFO | mean latency: 163.903 ms
+2026-09-02 22:00:52 PDT | INFO | median latency: 163.726 ms
+2026-09-02 22:00:52 PDT | INFO | min latency: 162.805 ms
+2026-09-02 22:00:52 PDT | INFO | max latency: 169.470 ms
+2026-09-02 22:00:52 PDT | INFO | KV size: 1.500 MiB
+2026-09-02 22:00:52 PDT | INFO | Effective bandwidth: 0.010 GB/s
+2026-09-02 22:00:52 PDT | INFO | Benchmark result logged to CSV: benchmarks/results/materialize.csv
+2026-09-02 22:09:52 PDT | INFO | -- Materialization correctness check
+2026-09-02 22:09:52 PDT | INFO | seq_len: 128
+2026-09-02 22:09:52 PDT | INFO | required_blocks: 8
+2026-09-02 22:09:52 PDT | INFO | block_table: [0, 1, 2, 3, 4, 5, 6, 7]
+2026-09-02 22:09:52 PDT | INFO | original K shape: torch.Size([1, 2, 128, 64])
+2026-09-02 22:09:52 PDT | INFO | materialized K shape: torch.Size([1, 2, 128, 64])
+2026-09-02 22:09:52 PDT | INFO | materialized V shape: torch.Size([1, 2, 128, 64])
+2026-09-02 22:09:52 PDT | INFO | Materialization correctness check passed.
+2026-09-02 22:10:02 PDT | INFO | -- Materialization benchmark
+2026-09-02 22:10:02 PDT | INFO | warmup iterations: 10
+2026-09-02 22:10:02 PDT | INFO | benchmark iterations: 50
+2026-09-02 22:10:02 PDT | INFO | mean latency: 164.163 ms
+2026-09-02 22:10:02 PDT | INFO | median latency: 163.694 ms
+2026-09-02 22:10:02 PDT | INFO | min latency: 162.284 ms
+2026-09-02 22:10:02 PDT | INFO | max latency: 170.412 ms
+2026-09-02 22:10:02 PDT | INFO | KV size: 1.500 MiB
+2026-09-02 22:10:02 PDT | INFO | Effective bandwidth: 0.010 GB/s
+2026-09-02 22:10:02 PDT | INFO | Benchmark result logged to CSV: benchmarks/results/materialize.csv
