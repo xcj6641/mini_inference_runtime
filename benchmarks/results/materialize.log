@@ -272,3 +272,18 @@
 2026-09-04 23:26:06 PDT | INFO | Correctness check passed: seq_len=128
 2026-09-04 23:26:13 PDT | INFO | Reference PagedAttention: seq_len=128, median=294.556 ms
 2026-09-04 23:26:13 PDT | INFO | Attention results: benchmarks/results/contiguous_attention_all_layers.csv
+2026-09-04 23:46:35 PDT | INFO | Preparing benchmark: seq_len=128
+2026-09-04 23:46:38 PDT | INFO | Correctness check passed: seq_len=128
+2026-09-04 23:46:42 PDT | INFO | Materialize + attention: seq_len=128, median=175.745 ms
+2026-09-04 23:46:42 PDT | INFO | Preparing benchmark: seq_len=512
+2026-09-04 23:46:43 PDT | INFO | Correctness check passed: seq_len=512
+2026-09-04 23:47:00 PDT | INFO | Materialize + attention: seq_len=512, median=664.292 ms
+2026-09-04 23:47:00 PDT | INFO | Preparing benchmark: seq_len=1024
+2026-09-04 23:47:03 PDT | INFO | Correctness check passed: seq_len=1024
+2026-09-04 23:47:37 PDT | INFO | Materialize + attention: seq_len=1024, median=1364.833 ms
+2026-09-04 23:47:37 PDT | INFO | Preparing benchmark: seq_len=2048
+2026-09-04 23:47:42 PDT | INFO | Correctness check passed: seq_len=2048
+2026-09-04 23:48:49 PDT | INFO | Materialize + attention: seq_len=2048, median=2641.959 ms
+2026-09-04 23:48:49 PDT | INFO | Preparing benchmark: seq_len=4096
+2026-09-04 23:48:59 PDT | INFO | Correctness check passed: seq_len=4096
+2026-09-04 23:51:12 PDT | INFO | Materialize + attention: seq_len=4096, median=5314.660 ms

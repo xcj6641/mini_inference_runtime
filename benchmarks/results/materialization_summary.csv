@@ -1,0 +1,17 @@
+seq_len,kv_size_mib,materialize_ms,attention_ms,materialize_plus_attention_ms,materialization_percent,effective_gbps
+128,1.5,171.03667449951172,2.0034559965133667,175.74451446533203,97.32120232592011,0.009196062801165434
+512,6.0,659.0100402832031,1.9973119497299194,664.2918395996094,99.2048977570476,0.009546828751343923
+1024,12.0,1315.4892578125,2.1667840480804443,1364.8327026367188,96.3846525124367,0.00956519555387618
+2048,24.0,2631.0277099609375,2.1483519077301025,2641.95947265625,99.58622519351815,0.00956501670610441
+4096,48.0,5250.387451171875,2.042880058288574,5314.659912109375,98.79065712575407,0.009586273102333826
+
+
+But remember: materialization_percent here uses separately measured medians, so treat it as an approximate diagnostic percentage, not a precise decomposition of the combined measurement.
+
+The important conclusion is much simpler:
+
+Across 128–4096 tokens, the current token-wise PyTorch materialization implementation scales approximately linearly with context length and dominates the total paged-KV-to-attention path. At 4096 tokens, materialization takes roughly 5.25 s compared with roughly 2 ms for the synthetic 24-layer contiguous attention microbenchmark. This motivates an attention implementation that consumes paged KV directly instead of reconstructing contiguous K/V first.
+
+And the critical caveat:
+
+The measured materialization latency reflects the current reference PyTorch implementation, which performs many fine-grained token-wise tensor operations; it should not be interpreted as the fundamental cost of copying the same number of bytes on the GPU.

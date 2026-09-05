@@ -32,6 +32,10 @@ PAGED_ATTENTION_CSV_PATH = (
     RESULTS_DIR / "reference_paged_attention.csv"
 )
 
+MATERIALIZE_ATTENTION_CSV_PATH = (
+    RESULTS_DIR / "materialize_plus_attention.csv"
+)
+
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -636,6 +640,66 @@ def run_reference_paged_attention_benchmark(
         "max_ms": stats["max_ms"],
     }
 
+##### materialize + attention
+def run_materialize_plus_attention_benchmark(
+        *,
+        seq_len: int,
+        query_per_layer: torch.Tensor,
+        paged_kv_cache: PagedKVCache,
+        block_table: list[int],
+        num_layers: int,
+        num_kv_heads: int,
+        head_dim: int,
+        block_size: int,
+        dtype: torch.dtype,
+    ) -> dict[str, object]:
+
+    def operation():
+        materialized = (
+            paged_kv_cache.materialize_request_kv(
+                block_table=block_table,
+                num_tokens=seq_len,
+            )
+        )
+
+        return contiguous_attention_all_layers(
+            query_per_layer=query_per_layer,
+            past_key_values=materialized,
+        )
+
+    latencies_ms = benchmark_cuda_operation(
+        operation
+    )
+
+    stats = calculate_latency_stats(
+        latencies_ms
+    )
+
+    bytes_copied = calculate_kv_bytes(
+        seq_len=seq_len,
+        num_layers=num_layers,
+        num_kv_heads=num_kv_heads,
+        head_dim=head_dim,
+        dtype=dtype,
+    )
+
+    kv_size_mib = bytes_copied / (1024 ** 2)
+
+    return {
+        "seq_len": seq_len,
+        "kv_size_mib": kv_size_mib,
+        "num_layers": num_layers,
+        "num_kv_heads": num_kv_heads,
+        "head_dim": head_dim,
+        "block_size": block_size,
+        "dtype": str(dtype),
+        "warmup_iters": WARMUP_ITERS,
+        "benchmark_iters": BENCHMARK_ITERS,
+        "median_ms": stats["median_ms"],
+        "mean_ms": stats["mean_ms"],
+        "min_ms": stats["min_ms"],
+        "max_ms": stats["max_ms"],
+    }
 def main() -> None:
     device = torch.device("cuda")
     dtype = torch.float16
@@ -647,10 +711,10 @@ def main() -> None:
 
     seq_lengths = [
         128,
-        # 512,
-        # 1024,
-        # 2048,
-        # 4096,
+        512,
+        1024,
+        2048,
+        4096,
     ]
 
     for seq_len in seq_lengths:
@@ -835,8 +899,37 @@ def main() -> None:
         # Reference paged attention benchmark
         # --------------------------------
 
-        paged_result = (
-            run_reference_paged_attention_benchmark(
+        # paged_result = (
+        #     run_reference_paged_attention_benchmark(
+        #         seq_len=seq_len,
+        #         query_per_layer=query_per_layer,
+        #         paged_kv_cache=paged_kv_cache,
+        #         block_table=block_table,
+        #         num_layers=num_layers,
+        #         num_kv_heads=num_kv_heads,
+        #         head_dim=head_dim,
+        #         dtype=dtype,
+        #     )
+        # )
+
+        # append_csv_row(
+        #     path=PAGED_ATTENTION_CSV_PATH,
+        #     row=paged_result,
+        # )
+
+        # logger.info(
+        #     "Reference PagedAttention: "
+        #     "seq_len=%d, median=%.3f ms",
+        #     seq_len,
+        #     paged_result["median_ms"],
+        # )
+
+        # --------------------------------
+        # Materialize + attention benchmark
+        # --------------------------------
+
+        combined_result = (
+            run_materialize_plus_attention_benchmark(
                 seq_len=seq_len,
                 query_per_layer=query_per_layer,
                 paged_kv_cache=paged_kv_cache,
@@ -844,20 +937,21 @@ def main() -> None:
                 num_layers=num_layers,
                 num_kv_heads=num_kv_heads,
                 head_dim=head_dim,
+                block_size=block_size,
                 dtype=dtype,
             )
         )
 
         append_csv_row(
-            path=PAGED_ATTENTION_CSV_PATH,
-            row=paged_result,
+            path=MATERIALIZE_ATTENTION_CSV_PATH,
+            row=combined_result,
         )
 
         logger.info(
-            "Reference PagedAttention: "
+            "Materialize + attention: "
             "seq_len=%d, median=%.3f ms",
             seq_len,
-            paged_result["median_ms"],
+            combined_result["median_ms"],
         )
 
     # --------------------------------
