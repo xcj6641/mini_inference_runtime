@@ -207,3 +207,68 @@
 2026-09-04 16:28:37 PDT | INFO | Correctness check passed: seq_len=4096
 2026-09-04 16:28:37 PDT | INFO | Contiguous attention: seq_len=4096, median=0.1111 ms
 2026-09-04 16:28:37 PDT | INFO | Attention results: benchmarks/results/contiguous_attention.csv
+2026-09-04 17:35:22 PDT | INFO | Preparing benchmark: seq_len=128
+2026-09-04 17:35:24 PDT | INFO | Correctness check passed: seq_len=128
+2026-09-04 17:35:24 PDT | INFO | Contiguous attention: seq_len=128, median=0.1157 ms
+2026-09-04 17:37:26 PDT | INFO | Preparing benchmark: seq_len=128
+2026-09-04 17:37:28 PDT | INFO | Correctness check passed: seq_len=128
+2026-09-04 17:38:44 PDT | INFO | Preparing benchmark: seq_len=128
+2026-09-04 17:38:46 PDT | INFO | Correctness check passed: seq_len=128
+2026-09-04 17:38:46 PDT | INFO | Contiguous attention all layers: seq_len=128, median=2.3655 ms
+2026-09-04 17:38:46 PDT | INFO | Preparing benchmark: seq_len=512
+2026-09-04 17:38:47 PDT | INFO | Correctness check passed: seq_len=512
+2026-09-04 17:38:47 PDT | INFO | Contiguous attention all layers: seq_len=512, median=2.3229 ms
+2026-09-04 17:38:47 PDT | INFO | Preparing benchmark: seq_len=1024
+2026-09-04 17:38:50 PDT | INFO | Correctness check passed: seq_len=1024
+2026-09-04 17:38:50 PDT | INFO | Contiguous attention all layers: seq_len=1024, median=2.2733 ms
+2026-09-04 17:38:50 PDT | INFO | Preparing benchmark: seq_len=2048
+2026-09-04 17:38:56 PDT | INFO | Correctness check passed: seq_len=2048
+2026-09-04 17:38:56 PDT | INFO | Contiguous attention all layers: seq_len=2048, median=2.0803 ms
+2026-09-04 17:38:56 PDT | INFO | Preparing benchmark: seq_len=4096
+2026-09-04 17:39:06 PDT | INFO | Correctness check passed: seq_len=4096
+2026-09-04 17:39:06 PDT | INFO | Contiguous attention all layers: seq_len=4096, median=2.0920 ms
+2026-09-04 17:39:06 PDT | INFO | Attention results: benchmarks/results/contiguous_attention_all_layers.csv
+2026-09-04 17:41:47 PDT | INFO | Preparing benchmark: seq_len=128
+2026-09-04 17:41:49 PDT | INFO | Correctness check passed: seq_len=128
+2026-09-04 17:41:49 PDT | INFO | Contiguous attention all layers: seq_len=128, median=1.9988 ms
+2026-09-04 17:41:49 PDT | INFO | Preparing benchmark: seq_len=512
+2026-09-04 17:41:50 PDT | INFO | Correctness check passed: seq_len=512
+2026-09-04 17:41:50 PDT | INFO | Contiguous attention all layers: seq_len=512, median=2.1248 ms
+2026-09-04 17:41:50 PDT | INFO | Preparing benchmark: seq_len=1024
+2026-09-04 17:41:53 PDT | INFO | Correctness check passed: seq_len=1024
+2026-09-04 17:41:53 PDT | INFO | Contiguous attention all layers: seq_len=1024, median=2.1729 ms
+2026-09-04 17:41:53 PDT | INFO | Preparing benchmark: seq_len=2048
+2026-09-04 17:41:58 PDT | INFO | Correctness check passed: seq_len=2048
+2026-09-04 17:41:58 PDT | INFO | Contiguous attention all layers: seq_len=2048, median=2.1642 ms
+2026-09-04 17:41:58 PDT | INFO | Preparing benchmark: seq_len=4096
+2026-09-04 17:42:09 PDT | INFO | Correctness check passed: seq_len=4096
+2026-09-04 17:42:09 PDT | INFO | Contiguous attention all layers: seq_len=4096, median=2.0480 ms
+2026-09-04 17:42:09 PDT | INFO | Attention results: benchmarks/results/contiguous_attention_all_layers.csv
+2026-09-04 17:54:30 PDT | INFO | Preparing benchmark: seq_len=128
+2026-09-04 17:54:32 PDT | INFO | Correctness check passed: seq_len=128
+2026-09-04 17:55:24 PDT | INFO | Preparing benchmark: seq_len=128
+2026-09-04 17:55:27 PDT | INFO | Correctness check passed: seq_len=128
+2026-09-04 17:55:27 PDT | INFO | Contiguous attention all layers: seq_len=128, median=2.0035 ms
+2026-09-04 17:55:27 PDT | INFO | Preparing benchmark: seq_len=512
+2026-09-04 17:55:28 PDT | INFO | Correctness check passed: seq_len=512
+2026-09-04 17:55:28 PDT | INFO | Contiguous attention all layers: seq_len=512, median=1.9973 ms
+2026-09-04 17:55:28 PDT | INFO | Preparing benchmark: seq_len=1024
+2026-09-04 17:55:31 PDT | INFO | Correctness check passed: seq_len=1024
+2026-09-04 17:55:31 PDT | INFO | Contiguous attention all layers: seq_len=1024, median=2.1668 ms
+2026-09-04 17:55:31 PDT | INFO | Preparing benchmark: seq_len=2048
+2026-09-04 17:55:36 PDT | INFO | Correctness check passed: seq_len=2048
+2026-09-04 17:55:36 PDT | INFO | Contiguous attention all layers: seq_len=2048, median=2.1484 ms
+2026-09-04 17:55:36 PDT | INFO | Preparing benchmark: seq_len=4096
+2026-09-04 17:55:47 PDT | INFO | Correctness check passed: seq_len=4096
+2026-09-04 17:55:47 PDT | INFO | Contiguous attention all layers: seq_len=4096, median=2.0429 ms
+2026-09-04 17:55:47 PDT | INFO | Attention results: benchmarks/results/contiguous_attention_all_layers.csv
+2026-09-04 23:12:53 PDT | INFO | Preparing benchmark: seq_len=128
+2026-09-04 23:12:55 PDT | INFO | Correctness check passed: seq_len=128
+2026-09-04 23:22:14 PDT | INFO | Preparing benchmark: seq_len=128
+2026-09-04 23:22:16 PDT | INFO | Correctness check passed: seq_len=128
+2026-09-04 23:22:17 PDT | INFO | Reference PagedAttention correctness passed: seq_len=128
+2026-09-04 23:22:17 PDT | INFO | Attention results: benchmarks/results/contiguous_attention_all_layers.csv
+2026-09-04 23:26:03 PDT | INFO | Preparing benchmark: seq_len=128
+2026-09-04 23:26:06 PDT | INFO | Correctness check passed: seq_len=128
+2026-09-04 23:26:13 PDT | INFO | Reference PagedAttention: seq_len=128, median=294.556 ms
+2026-09-04 23:26:13 PDT | INFO | Attention results: benchmarks/results/contiguous_attention_all_layers.csv

@@ -24,6 +24,13 @@ MATERIALIZE_CSV_PATH = RESULTS_DIR / "materialize.csv"
 ATTENTION_CSV_PATH = (
     RESULTS_DIR / "contiguous_attention.csv"
 )
+ATTENTION_ALL_LAYERS_CSV_PATH = (
+    RESULTS_DIR / "contiguous_attention_all_layers.csv"
+)
+
+PAGED_ATTENTION_CSV_PATH = (
+    RESULTS_DIR / "reference_paged_attention.csv"
+)
 
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -98,6 +105,24 @@ def calculate_latency_stats(
         "min_ms": min(latencies_ms),
         "max_ms": max(latencies_ms),
     }
+
+def append_csv_row(
+        *,
+        path: Path,
+        row: dict[str, object],
+    ) -> None:
+    file_exists = path.exists()
+
+    with path.open("a", newline="") as f:
+        writer = csv.DictWriter(
+            f,
+            fieldnames=list(row.keys()),
+        )
+
+        if not file_exists:
+            writer.writeheader()
+
+        writer.writerow(row)
 
 ##### materialize
 def make_fake_past_key_values(
@@ -319,6 +344,45 @@ def run_contiguous_attention_benchmark(
         "max_ms": stats["max_ms"],
     }
 
+def run_contiguous_attention_benchmark_all_layers(
+        *,
+        seq_len: int,
+        query_per_layer,
+        past_key_values,
+        num_layers: int,
+        num_kv_heads: int,
+        head_dim: int,
+        dtype: torch.dtype,
+    ) -> dict[str, object]:
+
+    def operation():
+        return contiguous_attention_all_layers(
+            query_per_layer=query_per_layer,
+            past_key_values=past_key_values,
+        )
+
+    latencies_ms = benchmark_cuda_operation(
+        operation
+    )
+
+    stats = calculate_latency_stats(
+        latencies_ms
+    )
+
+    return {
+        "seq_len": seq_len,
+        "num_layers": num_layers,
+        "num_kv_heads": num_kv_heads,
+        "head_dim": head_dim,
+        "dtype": str(dtype),
+        "warmup_iters": WARMUP_ITERS,
+        "benchmark_iters": BENCHMARK_ITERS,
+        "median_ms": stats["median_ms"],
+        "mean_ms": stats["mean_ms"],
+        "min_ms": stats["min_ms"],
+        "max_ms": stats["max_ms"],
+    }
+
 ##### attention
 def contiguous_attention(
         *,
@@ -343,23 +407,234 @@ def contiguous_attention(
         value,
     )
 
-def append_csv_row(
+def contiguous_attention_all_layers(
         *,
-        path: Path,
-        row: dict[str, object],
-    ) -> None:
-    file_exists = path.exists()
-
-    with path.open("a", newline="") as f:
-        writer = csv.DictWriter(
-            f,
-            fieldnames=list(row.keys()),
+        query_per_layer,
+        past_key_values,
+    ):
+    if len(query_per_layer) != len(past_key_values):
+        raise ValueError(
+            "query layer count does not match KV layer count"
         )
 
-        if not file_exists:
-            writer.writeheader()
+    outputs = []
 
-        writer.writerow(row)
+    for layer_idx, (key, value) in enumerate(
+        past_key_values
+    ):
+        output = contiguous_attention(
+            query=query_per_layer[layer_idx],
+            key=key,
+            value=value,
+        )
+        outputs.append(output)
+
+    return outputs
+
+##### reference paged attention
+def reference_paged_attention(
+        *,
+        query: torch.Tensor,
+        paged_kv_cache: PagedKVCache,
+        block_table: list[int],
+        layer_idx: int,
+        num_tokens: int,
+    ) -> torch.Tensor:
+    """
+    Reference implementation only.
+
+    query:
+        [1, num_kv_heads, 1, head_dim]
+
+    Reads K/V directly from paged KV storage using block_table.
+    Does NOT call materialize_request_kv().
+    """
+
+    if query.shape != (
+        1,
+        paged_kv_cache.num_kv_heads,
+        1,
+        paged_kv_cache.head_dim,
+    ):
+        raise ValueError(
+            "unexpected query shape"
+        )
+
+    if not 0 <= layer_idx < paged_kv_cache.num_layers:
+        raise ValueError(
+            "invalid layer_idx"
+        )
+
+    if num_tokens <= 0:
+        raise ValueError(
+            "num_tokens must be positive"
+        )
+
+    scale = query.shape[-1] ** -0.5
+
+    scores = []
+
+    for token_idx in range(num_tokens):
+        physical_block_id, slot_idx = (
+            paged_kv_cache.get_physical_location(
+                block_table,
+                token_idx,
+            )
+        )
+
+        key = paged_kv_cache.key_cache[
+            layer_idx,
+            physical_block_id,
+            :,
+            slot_idx,
+            :,
+        ]
+
+        # key:
+        # [num_kv_heads, head_dim]
+
+        key = key.unsqueeze(0).unsqueeze(2)
+
+        # [1, num_kv_heads, 1, head_dim]
+
+        token_score = (
+            query * key
+        ).sum(
+            dim=-1,
+            keepdim=True,
+        ) * scale
+
+        # [1, num_kv_heads, 1, 1]
+
+        scores.append(token_score)
+
+    attention_scores = torch.cat(
+        scores,
+        dim=-1,
+    )
+
+    # [1, num_kv_heads, 1, num_tokens]
+
+    probabilities = torch.softmax(
+        attention_scores,
+        dim=-1,
+    )
+
+    output = torch.zeros(
+        (
+            1,
+            paged_kv_cache.num_kv_heads,
+            1,
+            paged_kv_cache.head_dim,
+        ),
+        dtype=paged_kv_cache.dtype,
+        device=paged_kv_cache.device,
+    )
+
+    for token_idx in range(num_tokens):
+        physical_block_id, slot_idx = (
+            paged_kv_cache.get_physical_location(
+                block_table,
+                token_idx,
+            )
+        )
+
+        value = paged_kv_cache.value_cache[
+            layer_idx,
+            physical_block_id,
+            :,
+            slot_idx,
+            :,
+        ]
+
+        # [num_kv_heads, head_dim]
+
+        value = value.unsqueeze(0).unsqueeze(2)
+
+        # [1, num_kv_heads, 1, head_dim]
+
+        weight = probabilities[
+            ...,
+            token_idx
+        ].unsqueeze(-1)
+
+        # [1, num_kv_heads, 1, 1]
+
+        output += weight * value
+
+    return output
+
+def reference_paged_attention_all_layers(
+        *,
+        query_per_layer: torch.Tensor,
+        paged_kv_cache: PagedKVCache,
+        block_table: list[int],
+        num_tokens: int,
+    ):
+    if len(query_per_layer) != paged_kv_cache.num_layers:
+        raise ValueError(
+            "query layer count does not match cache layer count"
+        )
+
+    outputs = []
+
+    for layer_idx in range(
+        paged_kv_cache.num_layers
+    ):
+        output = reference_paged_attention(
+            query=query_per_layer[layer_idx],
+            paged_kv_cache=paged_kv_cache,
+            block_table=block_table,
+            layer_idx=layer_idx,
+            num_tokens=num_tokens,
+        )
+
+        outputs.append(output)
+
+    return outputs
+
+def run_reference_paged_attention_benchmark(
+        *,
+        seq_len: int,
+        query_per_layer: torch.Tensor,
+        paged_kv_cache: PagedKVCache,
+        block_table: list[int],
+        num_layers: int,
+        num_kv_heads: int,
+        head_dim: int,
+        dtype: torch.dtype,
+    ) -> dict[str, object]:
+
+    def operation():
+        return reference_paged_attention_all_layers(
+            query_per_layer=query_per_layer,
+            paged_kv_cache=paged_kv_cache,
+            block_table=block_table,
+            num_tokens=seq_len,
+        )
+
+    latencies_ms = benchmark_cuda_operation(
+        operation
+    )
+
+    stats = calculate_latency_stats(
+        latencies_ms
+    )
+
+    return {
+        "seq_len": seq_len,
+        "num_layers": num_layers,
+        "num_kv_heads": num_kv_heads,
+        "head_dim": head_dim,
+        "block_size": paged_kv_cache.block_size,
+        "dtype": str(dtype),
+        "warmup_iters": WARMUP_ITERS,
+        "benchmark_iters": BENCHMARK_ITERS,
+        "median_ms": stats["median_ms"],
+        "mean_ms": stats["mean_ms"],
+        "min_ms": stats["min_ms"],
+        "max_ms": stats["max_ms"],
+    }
 
 def main() -> None:
     device = torch.device("cuda")
@@ -372,10 +647,10 @@ def main() -> None:
 
     seq_lengths = [
         128,
-        512,
-        1024,
-        2048,
-        4096,
+        # 512,
+        # 1024,
+        # 2048,
+        # 4096,
     ]
 
     for seq_len in seq_lengths:
@@ -438,9 +713,43 @@ def main() -> None:
         # Contiguous attention benchmark
         # --------------------------------
 
-        key, value = materialized[0]
+        # key, value = materialized[0]
 
-        query = torch.randn(
+        # query = torch.randn(
+        #     1,
+        #     num_kv_heads,
+        #     1,
+        #     head_dim,
+        #     dtype=dtype,
+        #     device=device,
+        # )
+
+        # attention_result = (
+        #     run_contiguous_attention_benchmark(
+        #         seq_len=seq_len,
+        #         query=query,
+        #         key=key,
+        #         value=value,
+        #         num_kv_heads=num_kv_heads,
+        #         head_dim=head_dim,
+        #         dtype=dtype,
+        #     )
+        # )
+
+        # append_csv_row(
+        #     path=ATTENTION_CSV_PATH,
+        #     row=attention_result,
+        # )
+
+        # logger.info(
+        #     "Contiguous attention: seq_len=%d, "
+        #     "median=%.4f ms",
+        #     seq_len,
+        #     attention_result["median_ms"],
+        # )
+
+        query_per_layer = torch.randn(
+            num_layers,
             1,
             num_kv_heads,
             1,
@@ -448,13 +757,91 @@ def main() -> None:
             dtype=dtype,
             device=device,
         )
+        # --------------------------------
+        # Contiguous attention benchmark all layers
+        # --------------------------------
 
-        attention_result = (
-            run_contiguous_attention_benchmark(
+        # attention_result = (
+        #     run_contiguous_attention_benchmark_all_layers(
+        #         seq_len=seq_len,
+        #         query_per_layer=query_per_layer,
+        #         past_key_values=past_key_values,
+        #         num_layers=num_layers,
+        #         num_kv_heads=num_kv_heads,
+        #         head_dim=head_dim,
+        #         dtype=dtype,
+        #     )
+        # )
+
+        # append_csv_row(
+        #     path=ATTENTION_ALL_LAYERS_CSV_PATH,
+        #     row=attention_result,
+        # )
+
+        # logger.info(
+        #     "Contiguous attention all layers: seq_len=%d, "
+        #     "median=%.4f ms",
+        #     seq_len,
+        #     attention_result["median_ms"],
+        # )
+
+        # --------------------------------
+        # Reference paged attention benchmark:correctness check
+        # --------------------------------
+        # contiguous_outputs = (
+        #     contiguous_attention_all_layers(
+        #         query_per_layer=query_per_layer,
+        #         past_key_values=past_key_values,
+        #     )
+        # )
+
+        # paged_outputs = (
+        #     reference_paged_attention_all_layers(
+        #         query_per_layer=query_per_layer,
+        #         paged_kv_cache=paged_kv_cache,
+        #         block_table=block_table,
+        #         num_tokens=seq_len,
+        #     )
+        # )
+
+        # if len(contiguous_outputs) != len(paged_outputs):
+        #     raise RuntimeError(
+        #         "output layer count mismatch"
+        #     )
+
+        # for layer_idx, (
+        #     contiguous_output,
+        #     paged_output,
+        # ) in enumerate(
+        #     zip(
+        #         contiguous_outputs,
+        #         paged_outputs,
+        #     )
+        # ):
+        #     torch.testing.assert_close(
+        #         paged_output,
+        #         contiguous_output,
+        #         rtol=5e-3,
+        #         atol=5e-3,
+        #     )
+
+        # logger.info(
+        #     "Reference PagedAttention correctness passed: "
+        #     "seq_len=%d",
+        #     seq_len,
+        # )
+
+        # --------------------------------
+        # Reference paged attention benchmark
+        # --------------------------------
+
+        paged_result = (
+            run_reference_paged_attention_benchmark(
                 seq_len=seq_len,
-                query=query,
-                key=key,
-                value=value,
+                query_per_layer=query_per_layer,
+                paged_kv_cache=paged_kv_cache,
+                block_table=block_table,
+                num_layers=num_layers,
                 num_kv_heads=num_kv_heads,
                 head_dim=head_dim,
                 dtype=dtype,
@@ -462,26 +849,33 @@ def main() -> None:
         )
 
         append_csv_row(
-            path=ATTENTION_CSV_PATH,
-            row=attention_result,
+            path=PAGED_ATTENTION_CSV_PATH,
+            row=paged_result,
         )
 
         logger.info(
-            "Contiguous attention: seq_len=%d, "
-            "median=%.4f ms",
+            "Reference PagedAttention: "
+            "seq_len=%d, median=%.3f ms",
             seq_len,
-            attention_result["median_ms"],
+            paged_result["median_ms"],
         )
 
+    # --------------------------------
+    # CSV file
+    # --------------------------------
     # logger.info(
     #     "Materialization results: %s",
     #     MATERIALIZE_CSV_PATH,
     # )
 
-    logger.info(
-        "Attention results: %s",
-        ATTENTION_CSV_PATH,
-    )
+    # logger.info(
+    #     "Attention results: %s",
+    #     ATTENTION_CSV_PATH,
+    # )
+    # logger.info(
+    #     "Attention results: %s",
+    #     ATTENTION_ALL_LAYERS_CSV_PATH,
+    # )
 
 
 if __name__ == "__main__":
