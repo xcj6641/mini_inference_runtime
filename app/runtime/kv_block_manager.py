@@ -143,9 +143,9 @@ class KVBlockManager:
             self._ref_counts[block_id] += 1
 
     def release_blocks(
-        self,
-        block_ids: list[int] | tuple[int, ...],
-    ) -> None:
+            self,
+            block_ids: list[int] | tuple[int, ...],
+        ) -> None:
         for block_id in block_ids:
             if block_id not in self._ref_counts:
                 raise ValueError(
@@ -178,10 +178,10 @@ class KVBlockManager:
                 ] = ref_count
  
     def ensure_capacity(
-        self,
-        request: Request,
-        total_tokens: int,
-    ) -> list[int]:
+            self,
+            request: Request,
+            total_tokens: int,
+        ) -> list[int]:
         additional_blocks = (
             self.additional_blocks_required(
                 request=request,
@@ -198,10 +198,10 @@ class KVBlockManager:
         )
 
     def additional_blocks_required(
-        self,
-        request: Request,
-        total_tokens: int,
-    ) -> int:
+            self,
+            request: Request,
+            total_tokens: int,
+        ) -> int:
         if total_tokens < 0:
             raise ValueError(
                 "total_tokens must not be negative"

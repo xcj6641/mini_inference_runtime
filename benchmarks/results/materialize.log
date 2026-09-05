@@ -86,3 +86,124 @@
 2026-09-02 22:10:02 PDT | INFO | KV size: 1.500 MiB
 2026-09-02 22:10:02 PDT | INFO | Effective bandwidth: 0.010 GB/s
 2026-09-02 22:10:02 PDT | INFO | Benchmark result logged to CSV: benchmarks/results/materialize.csv
+2026-09-02 22:22:12 PDT | INFO | Starting materialization benchmark: seq_len=128
+2026-09-02 22:22:23 PDT | INFO | seq_len=128, kv_size=1.500 MiB, median=164.028 ms, bandwidth=0.0096 GB/s
+2026-09-02 22:22:23 PDT | INFO | Starting materialization benchmark: seq_len=512
+2026-09-02 22:23:04 PDT | INFO | seq_len=512, kv_size=6.000 MiB, median=655.305 ms, bandwidth=0.0096 GB/s
+2026-09-02 22:23:04 PDT | INFO | Starting materialization benchmark: seq_len=1024
+2026-09-02 22:24:24 PDT | INFO | seq_len=1024, kv_size=12.000 MiB, median=1309.766 ms, bandwidth=0.0096 GB/s
+2026-09-02 22:24:24 PDT | INFO | Starting materialization benchmark: seq_len=2048
+2026-09-02 22:27:04 PDT | INFO | seq_len=2048, kv_size=24.000 MiB, median=2617.668 ms, bandwidth=0.0096 GB/s
+2026-09-02 22:27:04 PDT | INFO | Starting materialization benchmark: seq_len=4096
+2026-09-02 22:32:26 PDT | INFO | seq_len=4096, kv_size=48.000 MiB, median=5251.395 ms, bandwidth=0.0096 GB/s
+2026-09-02 22:32:26 PDT | INFO | Benchmark result logged to CSV: benchmarks/results/materialize.csv
+2026-09-02 22:38:39 PDT | INFO | Starting materialization benchmark: seq_len=128
+2026-09-02 22:38:41 PDT | INFO | Correctness check passed: seq_len=128
+2026-09-02 22:38:45 PDT | INFO | seq_len=128, kv_size=1.500 MiB, median=169.436 ms, bandwidth=0.0093 GB/s
+2026-09-02 22:38:45 PDT | INFO | Starting materialization benchmark: seq_len=512
+2026-09-02 22:38:46 PDT | INFO | Correctness check passed: seq_len=512
+2026-09-02 22:39:03 PDT | INFO | seq_len=512, kv_size=6.000 MiB, median=653.782 ms, bandwidth=0.0096 GB/s
+2026-09-02 22:39:03 PDT | INFO | Starting materialization benchmark: seq_len=1024
+2026-09-02 22:39:05 PDT | INFO | Correctness check passed: seq_len=1024
+2026-09-02 22:39:41 PDT | INFO | - Starting materialization benchmark: seq_len=128
+2026-09-02 22:39:43 PDT | INFO | Correctness check passed: seq_len=128
+2026-09-02 22:39:47 PDT | INFO | seq_len=128, kv_size=1.500 MiB, median=164.208 ms, bandwidth=0.0096 GB/s
+2026-09-02 22:39:47 PDT | INFO | - Starting materialization benchmark: seq_len=512
+2026-09-02 22:39:48 PDT | INFO | Correctness check passed: seq_len=512
+2026-09-02 22:40:25 PDT | INFO | - Starting materialization benchmark: seq_len=128
+2026-09-02 22:40:27 PDT | INFO | Correctness check passed: seq_len=128
+2026-09-02 22:40:31 PDT | INFO | seq_len=128, kv_size=1.500 MiB, median=175.420 ms, bandwidth=0.0090 GB/s
+2026-09-02 22:40:31 PDT | INFO | - Starting materialization benchmark: seq_len=512
+2026-09-02 22:40:33 PDT | INFO | Correctness check passed: seq_len=512
+2026-09-02 22:40:50 PDT | INFO | seq_len=512, kv_size=6.000 MiB, median=698.329 ms, bandwidth=0.0090 GB/s
+2026-09-02 22:40:50 PDT | INFO | - Starting materialization benchmark: seq_len=1024
+2026-09-02 22:40:53 PDT | INFO | Correctness check passed: seq_len=1024
+2026-09-02 22:41:27 PDT | INFO | seq_len=1024, kv_size=12.000 MiB, median=1380.414 ms, bandwidth=0.0091 GB/s
+2026-09-02 22:41:27 PDT | INFO | - Starting materialization benchmark: seq_len=2048
+2026-09-02 22:41:33 PDT | INFO | Correctness check passed: seq_len=2048
+2026-09-02 22:42:42 PDT | INFO | seq_len=2048, kv_size=24.000 MiB, median=2773.410 ms, bandwidth=0.0091 GB/s
+2026-09-02 22:42:42 PDT | INFO | - Starting materialization benchmark: seq_len=4096
+2026-09-02 22:42:53 PDT | INFO | Correctness check passed: seq_len=4096
+2026-09-02 22:45:09 PDT | INFO | seq_len=4096, kv_size=48.000 MiB, median=5352.867 ms, bandwidth=0.0094 GB/s
+2026-09-02 22:45:09 PDT | INFO | Benchmark result logged to CSV: benchmarks/results/materialize.csv
+2026-09-02 22:50:22 PDT | INFO | - Starting materialization benchmark: seq_len=128
+2026-09-02 22:50:24 PDT | INFO | Correctness check passed: seq_len=128
+2026-09-02 22:50:29 PDT | INFO | seq_len=128, kv_size=1.500 MiB, median=166.905 ms, bandwidth=0.0094 GB/s
+2026-09-02 22:50:29 PDT | INFO | - Starting materialization benchmark: seq_len=512
+2026-09-02 22:50:30 PDT | INFO | Correctness check passed: seq_len=512
+2026-09-02 22:50:47 PDT | INFO | seq_len=512, kv_size=6.000 MiB, median=665.776 ms, bandwidth=0.0094 GB/s
+2026-09-02 22:50:47 PDT | INFO | - Starting materialization benchmark: seq_len=1024
+2026-09-02 22:50:49 PDT | INFO | Correctness check passed: seq_len=1024
+2026-09-02 22:51:23 PDT | INFO | seq_len=1024, kv_size=12.000 MiB, median=1328.973 ms, bandwidth=0.0095 GB/s
+2026-09-02 22:51:23 PDT | INFO | - Starting materialization benchmark: seq_len=2048
+2026-09-02 22:51:28 PDT | INFO | Correctness check passed: seq_len=2048
+2026-09-02 22:52:34 PDT | INFO | seq_len=2048, kv_size=24.000 MiB, median=2656.363 ms, bandwidth=0.0095 GB/s
+2026-09-02 22:52:34 PDT | INFO | - Starting materialization benchmark: seq_len=4096
+2026-09-02 22:52:45 PDT | INFO | Correctness check passed: seq_len=4096
+2026-09-02 22:54:58 PDT | INFO | seq_len=4096, kv_size=48.000 MiB, median=5306.163 ms, bandwidth=0.0095 GB/s
+2026-09-02 22:54:58 PDT | INFO | Benchmark result logged to CSV: benchmarks/results/materialize.csv
+2026-09-04 13:35:41 PDT | INFO | - Starting materialization benchmark: seq_len=128
+2026-09-04 13:35:43 PDT | INFO | Correctness check passed: seq_len=128
+2026-09-04 13:35:43 PDT | INFO | seq_len=128, contiguous_attention_median=0.1132 ms
+2026-09-04 13:35:48 PDT | INFO | seq_len=128, kv_size=1.500 MiB, median=171.402 ms, bandwidth=0.0092 GB/s
+2026-09-04 13:35:48 PDT | INFO | - Starting materialization benchmark: seq_len=512
+2026-09-04 13:35:49 PDT | INFO | Correctness check passed: seq_len=512
+2026-09-04 13:35:49 PDT | INFO | seq_len=512, contiguous_attention_median=0.1137 ms
+2026-09-04 13:36:06 PDT | INFO | seq_len=512, kv_size=6.000 MiB, median=659.425 ms, bandwidth=0.0095 GB/s
+2026-09-04 13:36:06 PDT | INFO | - Starting materialization benchmark: seq_len=1024
+2026-09-04 13:36:08 PDT | INFO | Correctness check passed: seq_len=1024
+2026-09-04 13:36:08 PDT | INFO | seq_len=1024, contiguous_attention_median=0.1096 ms
+2026-09-04 13:36:42 PDT | INFO | seq_len=1024, kv_size=12.000 MiB, median=1356.130 ms, bandwidth=0.0093 GB/s
+2026-09-04 13:36:42 PDT | INFO | - Starting materialization benchmark: seq_len=2048
+2026-09-04 13:36:48 PDT | INFO | Correctness check passed: seq_len=2048
+2026-09-04 13:36:48 PDT | INFO | seq_len=2048, contiguous_attention_median=0.1065 ms
+2026-09-04 13:37:54 PDT | INFO | seq_len=2048, kv_size=24.000 MiB, median=2636.894 ms, bandwidth=0.0095 GB/s
+2026-09-04 13:37:54 PDT | INFO | - Starting materialization benchmark: seq_len=4096
+2026-09-04 13:38:05 PDT | INFO | Correctness check passed: seq_len=4096
+2026-09-04 13:38:05 PDT | INFO | seq_len=4096, contiguous_attention_median=0.1055 ms
+2026-09-04 13:40:17 PDT | INFO | seq_len=4096, kv_size=48.000 MiB, median=5266.896 ms, bandwidth=0.0096 GB/s
+2026-09-04 13:40:17 PDT | INFO | Benchmark result logged to CSV: benchmarks/results/materialize.csv
+2026-09-04 14:59:06 PDT | INFO | Preparing benchmark: seq_len=128
+2026-09-04 14:59:08 PDT | INFO | Correctness check passed: seq_len=128
+2026-09-04 15:01:24 PDT | INFO | Preparing benchmark: seq_len=128
+2026-09-04 15:01:26 PDT | INFO | Correctness check passed: seq_len=128
+2026-09-04 15:01:31 PDT | INFO | Materialize: seq_len=128, median=171.037 ms, bandwidth=0.0092 GB/s
+2026-09-04 15:01:31 PDT | INFO | Preparing benchmark: seq_len=512
+2026-09-04 15:01:32 PDT | INFO | Correctness check passed: seq_len=512
+2026-09-04 15:01:49 PDT | INFO | Materialize: seq_len=512, median=659.010 ms, bandwidth=0.0095 GB/s
+2026-09-04 15:01:49 PDT | INFO | Preparing benchmark: seq_len=1024
+2026-09-04 15:01:51 PDT | INFO | Correctness check passed: seq_len=1024
+2026-09-04 15:02:24 PDT | INFO | Materialize: seq_len=1024, median=1315.489 ms, bandwidth=0.0096 GB/s
+2026-09-04 15:02:24 PDT | INFO | Preparing benchmark: seq_len=2048
+2026-09-04 15:02:30 PDT | INFO | Correctness check passed: seq_len=2048
+2026-09-04 15:03:36 PDT | INFO | Materialize: seq_len=2048, median=2631.028 ms, bandwidth=0.0096 GB/s
+2026-09-04 15:03:36 PDT | INFO | Preparing benchmark: seq_len=4096
+2026-09-04 15:03:46 PDT | INFO | Correctness check passed: seq_len=4096
+2026-09-04 15:05:58 PDT | INFO | Materialize: seq_len=4096, median=5250.387 ms, bandwidth=0.0096 GB/s
+2026-09-04 15:05:58 PDT | INFO | Materialization results: benchmarks/results/materialize.csv
+2026-09-04 16:27:28 PDT | INFO | Preparing benchmark: seq_len=128
+2026-09-04 16:27:30 PDT | INFO | Correctness check passed: seq_len=128
+2026-09-04 16:27:30 PDT | INFO | Contiguous attention: seq_len=128, median=0.1055 ms
+2026-09-04 16:27:30 PDT | INFO | Preparing benchmark: seq_len=512
+2026-09-04 16:27:32 PDT | INFO | Correctness check passed: seq_len=512
+2026-09-04 16:27:32 PDT | INFO | Contiguous attention: seq_len=512, median=0.1111 ms
+2026-09-04 16:27:32 PDT | INFO | Preparing benchmark: seq_len=1024
+2026-09-04 16:27:34 PDT | INFO | Correctness check passed: seq_len=1024
+2026-09-04 16:27:34 PDT | INFO | Contiguous attention: seq_len=1024, median=0.1096 ms
+2026-09-04 16:27:34 PDT | INFO | Preparing benchmark: seq_len=2048
+2026-09-04 16:28:14 PDT | INFO | Preparing benchmark: seq_len=128
+2026-09-04 16:28:17 PDT | INFO | Correctness check passed: seq_len=128
+2026-09-04 16:28:17 PDT | INFO | Contiguous attention: seq_len=128, median=0.1060 ms
+2026-09-04 16:28:17 PDT | INFO | Preparing benchmark: seq_len=512
+2026-09-04 16:28:18 PDT | INFO | Correctness check passed: seq_len=512
+2026-09-04 16:28:18 PDT | INFO | Contiguous attention: seq_len=512, median=0.1044 ms
+2026-09-04 16:28:18 PDT | INFO | Preparing benchmark: seq_len=1024
+2026-09-04 16:28:21 PDT | INFO | Correctness check passed: seq_len=1024
+2026-09-04 16:28:21 PDT | INFO | Contiguous attention: seq_len=1024, median=0.1142 ms
+2026-09-04 16:28:21 PDT | INFO | Preparing benchmark: seq_len=2048
+2026-09-04 16:28:26 PDT | INFO | Correctness check passed: seq_len=2048
+2026-09-04 16:28:26 PDT | INFO | Contiguous attention: seq_len=2048, median=0.1121 ms
+2026-09-04 16:28:26 PDT | INFO | Preparing benchmark: seq_len=4096
+2026-09-04 16:28:37 PDT | INFO | Correctness check passed: seq_len=4096
+2026-09-04 16:28:37 PDT | INFO | Contiguous attention: seq_len=4096, median=0.1111 ms
+2026-09-04 16:28:37 PDT | INFO | Attention results: benchmarks/results/contiguous_attention.csv
