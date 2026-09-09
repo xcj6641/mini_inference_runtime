@@ -1,10 +1,13 @@
-# tests/runtime/test_paged_attention_cuda.py
+import math
 
 import torch
 
-from app.runtime.cuda.paged_attention import paged_attention
+from app.runtime.cuda.paged_attention import (
+    paged_attention,
+)
 
-def test_paged_attention_cuda_computes_qk_scores() -> None:
+
+def test_paged_attention_cuda_computes_attention_weights() -> None:
     device = torch.device("cuda")
 
     num_layers = 2
@@ -12,6 +15,14 @@ def test_paged_attention_cuda_computes_qk_scores() -> None:
     num_kv_heads = 2
     block_size = 16
     head_dim = 64
+
+    query = torch.randn(
+        1,
+        num_kv_heads,
+        head_dim,
+        device=device,
+        dtype=torch.float16,
+    )
 
     key_cache = torch.randn(
         num_layers,
@@ -23,14 +34,8 @@ def test_paged_attention_cuda_computes_qk_scores() -> None:
         dtype=torch.float16,
     )
 
-    value_cache = torch.randn_like(key_cache)
-
-    query = torch.randn(
-        1,
-        num_kv_heads,
-        head_dim,
-        device=device,
-        dtype=torch.float16,
+    value_cache = torch.randn_like(
+        key_cache
     )
 
     # Logical block 0 -> physical block 3
@@ -60,7 +65,11 @@ def test_paged_attention_cuda_computes_qk_scores() -> None:
 
     assert output.dtype == torch.float32
 
-    expected = torch.empty(
+    # ------------------------------------------------------------
+    # Build the reference Q·K scores in PyTorch.
+    # ------------------------------------------------------------
+
+    expected_scores = torch.empty(
         num_tokens,
         num_kv_heads,
         device=device,
@@ -68,11 +77,18 @@ def test_paged_attention_cuda_computes_qk_scores() -> None:
     )
 
     for token_idx in range(num_tokens):
-        logical_block = token_idx // block_size
-        slot = token_idx % block_size
+        logical_block = (
+            token_idx // block_size
+        )
+
+        slot = (
+            token_idx % block_size
+        )
 
         physical_block = int(
-            block_table[logical_block].item()
+            block_table[
+                logical_block
+            ].item()
         )
 
         key = key_cache[
@@ -83,14 +99,57 @@ def test_paged_attention_cuda_computes_qk_scores() -> None:
             :,
         ]
 
-        expected[token_idx] = (
-            query[0].float() *
-            key.float()
+        expected_scores[token_idx] = (
+            query[0].float()
+            * key.float()
         ).sum(dim=-1)
+
+    # ------------------------------------------------------------
+    # Scaled dot-product attention:
+    #
+    # QK / sqrt(head_dim)
+    # ------------------------------------------------------------
+
+    expected_scores = (
+        expected_scores
+        / math.sqrt(head_dim)
+    )
+
+    # ------------------------------------------------------------
+    # scores shape:
+    #
+    # [tokens, heads]
+    #
+    # We want softmax over TOKENS independently for each head.
+    #
+    # Therefore dim=0.
+    # ------------------------------------------------------------
+
+    expected_weights = torch.softmax(
+        expected_scores,
+        dim=0,
+    )
 
     torch.testing.assert_close(
         output,
-        expected,
-        rtol=1e-3,
-        atol=1e-3,
+        expected_weights,
+        rtol=1e-4,
+        atol=1e-5,
+    )
+
+    # ------------------------------------------------------------
+    # Every head's attention weights should sum to 1.
+    # ------------------------------------------------------------
+
+    weight_sums = output.sum(
+        dim=0
+    )
+
+    torch.testing.assert_close(
+        weight_sums,
+        torch.ones_like(
+            weight_sums
+        ),
+        rtol=1e-5,
+        atol=1e-5,
     )

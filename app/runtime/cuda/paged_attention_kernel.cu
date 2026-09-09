@@ -6,12 +6,14 @@
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
 
+#include <cmath>
+
 
 __global__ void paged_qk_kernel(
     const __half* query,
     const __half* key_cache,
     const int32_t* block_table,
-    float* output,
+    float* scores,
     int64_t layer_idx,
     int64_t num_tokens,
     int64_t num_blocks,
@@ -32,25 +34,28 @@ __global__ void paged_qk_kernel(
     }
 
     // ------------------------------------------------------------
-    // Step 1:
-    // Find where this logical token lives in the paged KV cache.
+    // Logical token -> logical KV block + slot
     // ------------------------------------------------------------
 
     int logical_block = token_idx / block_size;
     int slot = token_idx % block_size;
 
-    int physical_block = block_table[logical_block];
+    // ------------------------------------------------------------
+    // Logical KV block -> physical KV block
+    // ------------------------------------------------------------
+
+    int physical_block =
+        block_table[logical_block];
 
     // ------------------------------------------------------------
-    // Step 2:
-    // Calculate the flattened key_cache address:
+    // key_cache shape:
     //
-    // key_cache[
-    //     layer_idx,
-    //     physical_block,
-    //     kv_head,
-    //     slot,
-    //     dim,
+    // [
+    //     num_layers,
+    //     num_blocks,
+    //     num_kv_heads,
+    //     block_size,
+    //     head_dim
     // ]
     // ------------------------------------------------------------
 
@@ -60,42 +65,24 @@ __global__ void paged_qk_kernel(
             * block_size + slot)
             * head_dim + dim);
 
-    // ------------------------------------------------------------
-    // Step 3:
     // query shape:
     //
     // [1, num_kv_heads, head_dim]
-    //
-    // batch_size is frozen to 1.
-    //
-    // query[0, kv_head, dim]
-    // ------------------------------------------------------------
 
     int64_t query_offset =
         kv_head * head_dim + dim;
 
-    // ------------------------------------------------------------
-    // Step 4:
-    // Every thread computes ONE element of:
-    //
-    // Q[dim] * K[dim]
-    //
-    // Accumulate in FP32.
-    // ------------------------------------------------------------
+    float q = __half2float(
+        query[query_offset]
+    );
 
-    float q = __half2float(query[query_offset]);
-    float k = __half2float(key_cache[key_offset]);
+    float k = __half2float(
+        key_cache[key_offset]
+    );
 
     float partial = q * k;
 
-    // ------------------------------------------------------------
-    // Step 5:
-    // All threads in this CUDA block need to add their partial
-    // products together.
-    //
-    // head_dim = 64, so we have 64 partial values.
-    // ------------------------------------------------------------
-
+    // Day 20 frozen head_dim = 64.
     __shared__ float partial_sums[64];
 
     partial_sums[dim] = partial;
@@ -103,45 +90,219 @@ __global__ void paged_qk_kernel(
     __syncthreads();
 
     // ------------------------------------------------------------
-    // Parallel reduction:
+    // Reduce 64 partial products into one Q·K score.
     //
-    // 64 values
-    //   ↓
-    // 32 values
-    //   ↓
-    // 16
-    //   ↓
-    // 8
-    //   ↓
-    // 4
-    //   ↓
-    // 2
-    //   ↓
-    // 1
+    // 64 -> 32 -> 16 -> 8 -> 4 -> 2 -> 1
     // ------------------------------------------------------------
 
-    for (int stride = head_dim / 2; stride > 0; stride /= 2) {
+    for (
+        int stride = head_dim / 2;
+        stride > 0;
+        stride /= 2
+    ) {
         if (dim < stride) {
-            partial_sums[dim] += partial_sums[dim + stride];
+            partial_sums[dim] +=
+                partial_sums[dim + stride];
         }
 
         __syncthreads();
     }
 
-    // ------------------------------------------------------------
-    // Thread 0 now owns the complete dot product.
+    // One score per:
     //
-    // output shape:
-    //
-    // [num_tokens, num_kv_heads]
-    // ------------------------------------------------------------
+    // [token_idx, kv_head]
 
     if (dim == 0) {
-        int64_t output_offset =
-            token_idx * num_kv_heads + kv_head;
+        int64_t score_offset =
+            token_idx * num_kv_heads
+            + kv_head;
 
-        output[output_offset] = partial_sums[0];
+        scores[score_offset] =
+            partial_sums[0];
     }
+}
+
+
+__global__ void scaled_softmax_kernel(
+    const float* scores,
+    float* weights,
+    int64_t num_tokens,
+    int64_t num_kv_heads,
+    int64_t head_dim
+) {
+    // ------------------------------------------------------------
+    // One CUDA thread block handles ONE head.
+    // ------------------------------------------------------------
+
+    int kv_head = blockIdx.x;
+
+    // ------------------------------------------------------------
+    // One thread handles ONE token.
+    //
+    // thread 0 -> token 0
+    // thread 1 -> token 1
+    // ...
+    // ------------------------------------------------------------
+
+    int token_idx = threadIdx.x;
+
+    if (
+        kv_head >= num_kv_heads ||
+        token_idx >= num_tokens
+    ) {
+        return;
+    }
+
+    // ------------------------------------------------------------
+    // Dynamic shared memory.
+    //
+    // We need:
+    //
+    // shared_scores[num_tokens]
+    // shared_reduction[num_tokens]
+    //
+    // Both live inside one CUDA thread block.
+    // ------------------------------------------------------------
+
+    extern __shared__ float shared_memory[];
+
+    float* shared_scores =
+        shared_memory;
+
+    float* shared_reduction =
+        shared_memory + num_tokens;
+
+    int64_t score_offset =
+        token_idx * num_kv_heads
+        + kv_head;
+
+    // ------------------------------------------------------------
+    // Attention scaling:
+    //
+    // Q·K / sqrt(head_dim)
+    // ------------------------------------------------------------
+
+    float scale =
+        1.0f / sqrtf(
+            static_cast<float>(head_dim)
+        );
+
+    float scaled_score =
+        scores[score_offset] * scale;
+
+    shared_scores[token_idx] =
+        scaled_score;
+
+    __syncthreads();
+
+    // ============================================================
+    // Step 1: find maximum score
+    //
+    // Stable softmax uses:
+    //
+    // exp(score - max_score)
+    //
+    // instead of:
+    //
+    // exp(score)
+    //
+    // to avoid numerical overflow.
+    // ============================================================
+
+    shared_reduction[token_idx] =
+        scaled_score;
+
+    __syncthreads();
+
+    // ------------------------------------------------------------
+    // This deliberately simple reduction works for our Day 20
+    // small token counts.
+    //
+    // Thread 0 finds the maximum serially.
+    // This is NOT optimized.
+    // ------------------------------------------------------------
+
+    if (token_idx == 0) {
+        float max_score =
+            shared_reduction[0];
+
+        for (
+            int i = 1;
+            i < num_tokens;
+            ++i
+        ) {
+            max_score =
+                fmaxf(
+                    max_score,
+                    shared_reduction[i]
+                );
+        }
+
+        shared_reduction[0] =
+            max_score;
+    }
+
+    __syncthreads();
+
+    float max_score =
+        shared_reduction[0];
+
+    // ============================================================
+    // Step 2: exponentiate
+    //
+    // exp(score - max_score)
+    // ============================================================
+
+    float exp_score =
+        expf(
+            shared_scores[token_idx]
+            - max_score
+        );
+
+    shared_scores[token_idx] =
+        exp_score;
+
+    __syncthreads();
+
+    // ============================================================
+    // Step 3: sum exponentials
+    //
+    // Again, thread 0 does this serially for simplicity.
+    // ============================================================
+
+    if (token_idx == 0) {
+        float sum_exp = 0.0f;
+
+        for (
+            int i = 0;
+            i < num_tokens;
+            ++i
+        ) {
+            sum_exp +=
+                shared_scores[i];
+        }
+
+        shared_reduction[0] =
+            sum_exp;
+    }
+
+    __syncthreads();
+
+    float sum_exp =
+        shared_reduction[0];
+
+    // ============================================================
+    // Step 4: normalize
+    //
+    // weight_i =
+    //
+    // exp(score_i - max)
+    // ------------------
+    // sum(exp(score_j - max))
+    // ============================================================
+
+    weights[score_offset] =
+        exp_score / sum_exp;
 }
 
 
@@ -153,32 +314,55 @@ torch::Tensor paged_attention_cuda_forward(
     int64_t num_tokens,
     int64_t layer_idx
 ) {
-    const auto num_blocks = key_cache.size(1);
-    const auto num_kv_heads = key_cache.size(2);
-    const auto block_size = key_cache.size(3);
-    const auto head_dim = key_cache.size(4);
+    const auto num_blocks =
+        key_cache.size(1);
 
-    // Q·K score:
-    //
-    // one score for each:
-    //
-    // (logical token, KV head)
+    const auto num_kv_heads =
+        key_cache.size(2);
 
-    auto output = torch::empty(
-        {num_tokens, num_kv_heads},
-        key_cache.options().dtype(torch::kFloat32)
+    const auto block_size =
+        key_cache.size(3);
+
+    const auto head_dim =
+        key_cache.size(4);
+
+    // ------------------------------------------------------------
+    // Temporary Q·K scores:
+    //
+    // [num_tokens, num_kv_heads]
+    // ------------------------------------------------------------
+
+    auto scores = torch::empty(
+        {
+            num_tokens,
+            num_kv_heads,
+        },
+        key_cache.options().dtype(
+            torch::kFloat32
+        )
     );
 
-    dim3 grid(
+    // ------------------------------------------------------------
+    // Kernel 1:
+    //
+    // one CUDA thread block per (token, head)
+    //
+    // one CUDA thread per head dimension
+    // ------------------------------------------------------------
+
+    dim3 qk_grid(
         num_tokens,
         num_kv_heads
     );
 
-    dim3 block(
+    dim3 qk_block(
         head_dim
     );
 
-    paged_qk_kernel<<<grid, block>>>(
+    paged_qk_kernel<<<
+        qk_grid,
+        qk_block
+    >>>(
         reinterpret_cast<const __half*>(
             query.data_ptr<at::Half>()
         ),
@@ -186,7 +370,7 @@ torch::Tensor paged_attention_cuda_forward(
             key_cache.data_ptr<at::Half>()
         ),
         block_table.data_ptr<int32_t>(),
-        output.data_ptr<float>(),
+        scores.data_ptr<float>(),
         layer_idx,
         num_tokens,
         num_blocks,
@@ -195,5 +379,55 @@ torch::Tensor paged_attention_cuda_forward(
         head_dim
     );
 
-    return output;
+    // ------------------------------------------------------------
+    // Attention weights:
+    //
+    // [num_tokens, num_kv_heads]
+    // ------------------------------------------------------------
+
+    auto weights = torch::empty_like(
+        scores
+    );
+
+    // ------------------------------------------------------------
+    // Kernel 2:
+    //
+    // one CUDA thread block per KV head
+    //
+    // one thread per logical token
+    //
+    // Example:
+    //
+    // num_tokens = 20
+    // num_heads  = 2
+    //
+    // grid  = 2 blocks
+    // block = 20 threads
+    // ------------------------------------------------------------
+
+    dim3 softmax_grid(
+        num_kv_heads
+    );
+
+    dim3 softmax_block(
+        num_tokens
+    );
+
+    // Two float arrays of num_tokens elements.
+    size_t shared_memory_bytes =
+        2 * num_tokens * sizeof(float);
+
+    scaled_softmax_kernel<<<
+        softmax_grid,
+        softmax_block,
+        shared_memory_bytes
+    >>>(
+        scores.data_ptr<float>(),
+        weights.data_ptr<float>(),
+        num_tokens,
+        num_kv_heads,
+        head_dim
+    );
+
+    return weights;
 }
