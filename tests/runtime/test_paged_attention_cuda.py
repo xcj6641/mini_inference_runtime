@@ -1,13 +1,34 @@
 import math
 
+import pytest
 import torch
 
-from app.runtime.cuda.paged_attention import (
-    paged_attention,
+from app.runtime.cuda.paged_attention import paged_attention
+
+
+@pytest.mark.parametrize(
+    (
+        "num_tokens",
+        "block_table_values",
+    ),
+    [
+        # Exactly one full block.
+        (16, [2]),
+
+        # Partial second block.
+        (20, [3, 1]),
+
+        # Exactly two full blocks.
+        (32, [0, 2]),
+
+        # Two full blocks with scrambled physical order.
+        (32, [3, 1]),
+    ],
 )
-
-
-def test_paged_attention_cuda_matches_reference() -> None:
+def test_paged_attention_cuda_matches_reference(
+    num_tokens: int,
+    block_table_values: list[int],
+) -> None:
     device = torch.device("cuda")
 
     num_layers = 2
@@ -15,6 +36,8 @@ def test_paged_attention_cuda_matches_reference() -> None:
     num_kv_heads = 2
     block_size = 16
     head_dim = 64
+
+    layer_idx = 1
 
     query = torch.randn(
         1,
@@ -38,16 +61,11 @@ def test_paged_attention_cuda_matches_reference() -> None:
         key_cache
     )
 
-    # Logical block 0 -> physical block 3
-    # Logical block 1 -> physical block 1
     block_table = torch.tensor(
-        [3, 1],
+        block_table_values,
         device=device,
         dtype=torch.int32,
     )
-
-    layer_idx = 1
-    num_tokens = 20
 
     output = paged_attention(
         query=query,
@@ -67,10 +85,11 @@ def test_paged_attention_cuda_matches_reference() -> None:
     assert output.dtype == torch.float32
 
     # ------------------------------------------------------------
-    # Build logical contiguous K/V using PyTorch.
+    # Build the logical K/V sequence using PyTorch.
     #
-    # This is only the test oracle.
-    # The CUDA implementation does NOT materialize them.
+    # This is only the correctness oracle.
+    #
+    # The CUDA implementation must NOT materialize K/V like this.
     # ------------------------------------------------------------
 
     logical_keys = []
@@ -110,7 +129,6 @@ def test_paged_attention_cuda_matches_reference() -> None:
         logical_keys.append(key)
         logical_values.append(value)
 
-    # [tokens, heads, head_dim]
     logical_keys = torch.stack(
         logical_keys,
         dim=0,
@@ -139,12 +157,26 @@ def test_paged_attention_cuda_matches_reference() -> None:
         * logical_keys
     ).sum(dim=-1)
 
+    # ------------------------------------------------------------
+    # Scale:
+    #
+    # QK / sqrt(head_dim)
+    # ------------------------------------------------------------
+
     scores = (
         scores
         / math.sqrt(head_dim)
     )
 
-    # Softmax across TOKENS for each head.
+    # ------------------------------------------------------------
+    # Softmax over tokens for each head.
+    #
+    # scores shape:
+    # [tokens, heads]
+    #
+    # therefore dim=0.
+    # ------------------------------------------------------------
+
     weights = torch.softmax(
         scores,
         dim=0,
@@ -159,7 +191,8 @@ def test_paged_attention_cuda_matches_reference() -> None:
     # logical_values:
     # [tokens, heads, head_dim]
     #
-    # -> [heads, head_dim]
+    # result:
+    # [heads, head_dim]
     # ------------------------------------------------------------
 
     expected = (
