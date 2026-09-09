@@ -7,7 +7,7 @@ from app.runtime.cuda.paged_attention import (
 )
 
 
-def test_paged_attention_cuda_computes_attention_weights() -> None:
+def test_paged_attention_cuda_matches_reference() -> None:
     device = torch.device("cuda")
 
     num_layers = 2
@@ -59,22 +59,22 @@ def test_paged_attention_cuda_computes_attention_weights() -> None:
     )
 
     assert output.shape == (
-        num_tokens,
+        1,
         num_kv_heads,
+        head_dim,
     )
 
     assert output.dtype == torch.float32
 
     # ------------------------------------------------------------
-    # Build the reference Q·K scores in PyTorch.
+    # Build logical contiguous K/V using PyTorch.
+    #
+    # This is only the test oracle.
+    # The CUDA implementation does NOT materialize them.
     # ------------------------------------------------------------
 
-    expected_scores = torch.empty(
-        num_tokens,
-        num_kv_heads,
-        device=device,
-        dtype=torch.float32,
-    )
+    logical_keys = []
+    logical_values = []
 
     for token_idx in range(num_tokens):
         logical_block = (
@@ -99,57 +99,79 @@ def test_paged_attention_cuda_computes_attention_weights() -> None:
             :,
         ]
 
-        expected_scores[token_idx] = (
-            query[0].float()
-            * key.float()
-        ).sum(dim=-1)
+        value = value_cache[
+            layer_idx,
+            physical_block,
+            :,
+            slot,
+            :,
+        ]
+
+        logical_keys.append(key)
+        logical_values.append(value)
+
+    # [tokens, heads, head_dim]
+    logical_keys = torch.stack(
+        logical_keys,
+        dim=0,
+    ).float()
+
+    logical_values = torch.stack(
+        logical_values,
+        dim=0,
+    ).float()
 
     # ------------------------------------------------------------
-    # Scaled dot-product attention:
+    # Q · K
     #
-    # QK / sqrt(head_dim)
+    # query[0]:
+    # [heads, head_dim]
+    #
+    # logical_keys:
+    # [tokens, heads, head_dim]
+    #
+    # result:
+    # [tokens, heads]
     # ------------------------------------------------------------
 
-    expected_scores = (
-        expected_scores
+    scores = (
+        query[0].float().unsqueeze(0)
+        * logical_keys
+    ).sum(dim=-1)
+
+    scores = (
+        scores
         / math.sqrt(head_dim)
     )
 
-    # ------------------------------------------------------------
-    # scores shape:
-    #
-    # [tokens, heads]
-    #
-    # We want softmax over TOKENS independently for each head.
-    #
-    # Therefore dim=0.
-    # ------------------------------------------------------------
-
-    expected_weights = torch.softmax(
-        expected_scores,
+    # Softmax across TOKENS for each head.
+    weights = torch.softmax(
+        scores,
         dim=0,
     )
 
+    # ------------------------------------------------------------
+    # Weighted V sum:
+    #
+    # weights:
+    # [tokens, heads]
+    #
+    # logical_values:
+    # [tokens, heads, head_dim]
+    #
+    # -> [heads, head_dim]
+    # ------------------------------------------------------------
+
+    expected = (
+        weights.unsqueeze(-1)
+        * logical_values
+    ).sum(dim=0)
+
+    expected = expected.unsqueeze(0)
+
     torch.testing.assert_close(
         output,
-        expected_weights,
+        expected,
         rtol=1e-4,
-        atol=1e-5,
-    )
-
-    # ------------------------------------------------------------
-    # Every head's attention weights should sum to 1.
-    # ------------------------------------------------------------
-
-    weight_sums = output.sum(
-        dim=0
-    )
-
-    torch.testing.assert_close(
-        weight_sums,
-        torch.ones_like(
-            weight_sums
-        ),
-        rtol=1e-5,
-        atol=1e-5,
+        atol=1e-4,
     )
