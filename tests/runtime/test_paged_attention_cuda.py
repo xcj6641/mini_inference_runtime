@@ -4,7 +4,7 @@ import torch
 
 from app.runtime.cuda.paged_attention import paged_attention
 
-def test_paged_attention_cuda_reads_paged_key_cache() -> None:
+def test_paged_attention_cuda_computes_qk_scores() -> None:
     device = torch.device("cuda")
 
     num_layers = 2
@@ -53,17 +53,44 @@ def test_paged_attention_cuda_reads_paged_key_cache() -> None:
         layer_idx=layer_idx,
     )
 
-    expected = torch.cat(
-        [
-            key_cache[layer_idx, 3, :, :, :].permute(1, 0, 2),
-            key_cache[layer_idx, 1, :, :4, :].permute(1, 0, 2),
-        ],
-        dim=0,
+    assert output.shape == (
+        num_tokens,
+        num_kv_heads,
     )
 
-    assert output.shape == (20, 2, 64)
+    assert output.dtype == torch.float32
+
+    expected = torch.empty(
+        num_tokens,
+        num_kv_heads,
+        device=device,
+        dtype=torch.float32,
+    )
+
+    for token_idx in range(num_tokens):
+        logical_block = token_idx // block_size
+        slot = token_idx % block_size
+
+        physical_block = int(
+            block_table[logical_block].item()
+        )
+
+        key = key_cache[
+            layer_idx,
+            physical_block,
+            :,
+            slot,
+            :,
+        ]
+
+        expected[token_idx] = (
+            query[0].float() *
+            key.float()
+        ).sum(dim=-1)
 
     torch.testing.assert_close(
         output,
         expected,
+        rtol=1e-3,
+        atol=1e-3,
     )
