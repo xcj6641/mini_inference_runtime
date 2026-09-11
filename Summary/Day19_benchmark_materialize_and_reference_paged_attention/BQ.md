@@ -1,0 +1,2 @@
+Question:
+During interview, interviewers may ask some questions about GPU's performance when a large computation there is/network throughput. But our test case is always small, how should we prepare this case.
