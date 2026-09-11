@@ -118,12 +118,6 @@ tests/
 Summary/                     Day-by-day implementation notes and reports
 ```
 
-## Benchmark methodology
-
-GPU operations use warm-up iterations followed by repeated measurements with CUDA events. A separate wall-clock validation synchronizes CUDA before and after each measured operation to confirm that asynchronous execution is not producing misleading timings.
-
-Correctness is checked against contiguous attention or the PyTorch reference implementation before performance comparisons are recorded. Important runs are written to CSV so results can be compared and used in reports.
-
 ## Key benchmark results
 
 On an NVIDIA A10G, the one-layer FP16 benchmark compared the existing materialized path—paged KV cache → contiguous K/V tensors → PyTorch attention—with the custom CUDA kernel reading K/V directly through the block table.
@@ -138,11 +132,16 @@ Across all tested sequence lengths, direct paged attention reduced end-to-end la
 
 These results demonstrate the architectural benefit of operating directly on paged KV storage; they do not imply that the prototype kernel outperforms optimized production attention kernels. The custom implementation remains slower than contiguous PyTorch attention alone, but it avoids the dominant cost of first reconstructing contiguous K/V tensors.
 
+## Benchmark methodology
+
+GPU operations use warm-up iterations followed by repeated measurements with CUDA events. A separate wall-clock validation synchronizes CUDA before and after each measured operation to confirm that asynchronous execution is not producing misleading timings.
+
+Correctness is checked against contiguous attention or the PyTorch reference implementation before performance comparisons are recorded. Important runs are written to CSV so results can be compared and used in reports.
 
 ## Known limitations
 
 - This is a focused systems prototype rather than a production server.
-- The CUDA kernel currently supports only its fixed Day 20/21 configuration.
+- The CUDA kernel currently supports single-request, single-token decode with FP16 inputs, 2 attention heads, head dimension 64, and KV block size 16.
 - The real model runner uses the Hugging Face legacy KV-cache representation.
 - CUDA extension compilation currently occurs when the CUDA wrapper module is imported.
 - Benchmark scripts still contain some duplicated helpers and are candidates for later consolidation.
