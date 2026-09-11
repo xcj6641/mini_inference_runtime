@@ -1,0 +1,34 @@
+2026-09-09 22:35:36 PDT | INFO | Starting Day 21 benchmark | sequence_lengths=(128, 512, 1024, 2048)
+2026-09-09 22:35:36 PDT | INFO | Correctness passed | seq_len=128 | max_abs_error=0.000201
+2026-09-09 22:35:36 PDT | INFO | Result | seq_len=128 | materialize=7.0707 ms | contiguous=0.1075 ms | materialized_total=7.1721 ms | direct_paged=0.0707 ms | 101.507x speedup | materialization=98.59%
+2026-09-09 22:35:36 PDT | INFO | Correctness passed | seq_len=512 | max_abs_error=0.000115
+2026-09-09 22:35:38 PDT | INFO | Result | seq_len=512 | materialize=28.1052 ms | contiguous=0.1075 ms | materialized_total=28.3622 ms | direct_paged=0.1894 ms | 149.716x speedup | materialization=99.09%
+2026-09-09 22:35:38 PDT | INFO | Correctness passed | seq_len=1024 | max_abs_error=0.000050
+2026-09-09 22:35:41 PDT | INFO | Result | seq_len=1024 | materialize=55.8316 ms | contiguous=0.1096 ms | materialized_total=56.0241 ms | direct_paged=0.3502 ms | 159.974x speedup | materialization=99.66%
+2026-09-09 22:35:41 PDT | INFO | Correctness passed | seq_len=2048 | max_abs_error=0.000058
+2026-09-09 22:35:47 PDT | INFO | Result | seq_len=2048 | materialize=111.8361 ms | contiguous=0.1096 ms | materialized_total=111.1342 ms | direct_paged=0.6738 ms | 164.938x speedup | materialization=100.63%
+2026-09-09 22:35:47 PDT | INFO | Benchmark CSV written to benchmarks/results/paged_attention_benchmark.csv
+2026-09-09 23:13:12 PDT | INFO | Starting Day 21 benchmark | sequence_lengths=(128, 512, 1024, 2048, 4096)
+2026-09-09 23:13:12 PDT | INFO | Correctness passed | seq_len=128 | max_abs_error=0.000195
+2026-09-09 23:13:12 PDT | INFO | Result | seq_len=128 | materialize=6.9079 ms | contiguous=0.1055 ms | materialized_total=7.0134 ms | direct_paged=0.0707 ms | 99.261x speedup | materialization=98.50%
+2026-09-09 23:13:12 PDT | INFO | Correctness passed | seq_len=512 | max_abs_error=0.000084
+2026-09-09 23:13:14 PDT | INFO | Result | seq_len=512 | materialize=27.7064 ms | contiguous=0.1044 ms | materialized_total=27.7556 ms | direct_paged=0.1894 ms | 146.514x speedup | materialization=99.82%
+2026-09-09 23:13:14 PDT | INFO | Correctness passed | seq_len=1024 | max_abs_error=0.000059
+2026-09-09 23:13:17 PDT | INFO | Result | seq_len=1024 | materialize=56.7373 ms | contiguous=0.1106 ms | materialized_total=57.5212 ms | direct_paged=0.3564 ms | 161.417x speedup | materialization=98.64%
+2026-09-09 23:13:17 PDT | INFO | Correctness passed | seq_len=2048 | max_abs_error=0.000079
+2026-09-09 23:13:23 PDT | INFO | Result | seq_len=2048 | materialize=114.0823 ms | contiguous=0.1085 ms | materialized_total=114.8032 ms | direct_paged=0.6958 ms | 164.993x speedup | materialization=99.37%
+2026-09-09 23:13:23 PDT | INFO | Correctness passed | seq_len=4096 | max_abs_error=0.000032
+2026-09-09 23:13:34 PDT | INFO | Result | seq_len=4096 | materialize=226.1775 ms | contiguous=0.1065 ms | materialized_total=220.8425 ms | direct_paged=1.3179 ms | 167.569x speedup | materialization=102.42%
+2026-09-09 23:13:34 PDT | INFO | Benchmark CSV written to benchmarks/results/paged_attention_benchmark.csv
+2026-09-09 23:22:13 PDT | INFO | Starting Day 21 benchmark | sequence_lengths=(128, 512, 1024, 2048, 4096)
+2026-09-09 23:22:13 PDT | INFO | Correctness passed | seq_len=128 | max_abs_error=0.000429
+2026-09-09 23:22:13 PDT | INFO | Result | seq_len=128 | materialize=7.1920 ms | contiguous=0.1157 ms | materialized_total=7.3948 ms | direct_paged=0.0732 ms | 101.000x speedup | materialization=98.42%
+2026-09-09 23:22:13 PDT | INFO | Correctness passed | seq_len=512 | max_abs_error=0.000109
+2026-09-09 23:22:15 PDT | INFO | Result | seq_len=512 | materialize=28.6172 ms | contiguous=0.1203 ms | materialized_total=28.6019 ms | direct_paged=0.1905 ms | 150.169x speedup | materialization=99.58%
+2026-09-09 23:22:15 PDT | INFO | Correctness passed | seq_len=1024 | max_abs_error=0.000062
+2026-09-09 23:22:18 PDT | INFO | Result | seq_len=1024 | materialize=54.2981 ms | contiguous=0.1106 ms | materialized_total=54.5900 ms | direct_paged=0.3502 ms | 155.879x speedup | materialization=99.80%
+2026-09-09 23:22:18 PDT | INFO | Correctness passed | seq_len=2048 | max_abs_error=0.000044
+2026-09-09 23:22:24 PDT | INFO | Result | seq_len=2048 | materialize=108.9285 ms | contiguous=0.1126 ms | materialized_total=115.5016 ms | direct_paged=0.6753 ms | 171.030x speedup | materialization=99.90%
+2026-09-09 23:22:24 PDT | INFO | Correctness passed | seq_len=4096 | max_abs_error=0.000046
+2026-09-09 23:22:35 PDT | INFO | Result | seq_len=4096 | materialize=218.3316 ms | contiguous=0.1147 ms | materialized_total=218.8994 ms | direct_paged=1.3189 ms | 165.972x speedup | materialization=99.95%
+2026-09-09 23:22:35 PDT | INFO | Benchmark CSV written to benchmarks/results/paged_attention_benchmark.csv
