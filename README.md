@@ -124,6 +124,21 @@ GPU operations use warm-up iterations followed by repeated measurements with CUD
 
 Correctness is checked against contiguous attention or the PyTorch reference implementation before performance comparisons are recorded. Important runs are written to CSV so results can be compared and used in reports.
 
+## Key benchmark results
+
+On an NVIDIA A10G, the one-layer FP16 benchmark compared the existing materialized path—paged KV cache → contiguous K/V tensors → PyTorch attention—with the custom CUDA kernel reading K/V directly through the block table.
+
+| Sequence length | Materialized path | Direct CUDA PagedAttention | Speedup |
+| --------------: | ----------------: | -------------------------: | ------: |
+|             128 |          7.395 ms |                   0.073 ms |  101.0× |
+|           1,024 |         54.590 ms |                   0.350 ms |  155.9× |
+|           4,096 |        218.899 ms |                   1.319 ms |  166.0× |
+
+Across all tested sequence lengths, direct paged attention reduced end-to-end latency by approximately **101–171×** relative to this runtime’s materialized path. Explicit KV materialization accounted for **98.42–99.95%** of the component-wise baseline and scaled from 7.192 ms at 128 tokens to 218.332 ms at 4,096 tokens.
+
+These results demonstrate the architectural benefit of operating directly on paged KV storage; they do not imply that the prototype kernel outperforms optimized production attention kernels. The custom implementation remains slower than contiguous PyTorch attention alone, but it avoids the dominant cost of first reconstructing contiguous K/V tensors.
+
+
 ## Known limitations
 
 - This is a focused systems prototype rather than a production server.
