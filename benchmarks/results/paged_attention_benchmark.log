@@ -95,3 +95,20 @@
 2026-09-11 12:03:24 PDT | INFO | Timing validation | seq_len=4096 | operation=materialized_path | cuda_event=215.8812 ms | wall_clock=216.1464 ms | difference=0.2652 ms
 2026-09-11 12:03:24 PDT | INFO | Timing validation | seq_len=4096 | operation=direct_paged | cuda_event=1.3189 ms | wall_clock=1.3227 ms | difference=0.0038 ms
 2026-09-11 12:03:24 PDT | INFO | Timing validation CSV written to benchmarks/results/paged_attention_timing_validation.csv
+2026-09-11 15:49:09 PDT | INFO | Starting timing validation | sequence_lengths=(128, 1024, 4096)
+2026-09-11 15:49:09 PDT | INFO | Correctness passed | seq_len=128 | max_abs_error=0.000157
+2026-09-11 15:49:09 PDT | INFO | Timing validation | seq_len=128 | operation=materialize | cuda_event=6.8516 ms | wall_clock=6.8419 ms | difference=-0.0097 ms
+2026-09-11 15:49:09 PDT | INFO | Timing validation | seq_len=128 | operation=contiguous_attention | cuda_event=0.1050 ms | wall_clock=0.1003 ms | difference=-0.0047 ms
+2026-09-11 15:49:10 PDT | INFO | Timing validation | seq_len=128 | operation=materialized_path | cuda_event=7.1921 ms | wall_clock=7.1263 ms | difference=-0.0657 ms
+2026-09-11 15:49:10 PDT | INFO | Timing validation | seq_len=128 | operation=direct_paged | cuda_event=0.0717 ms | wall_clock=0.0745 ms | difference=0.0028 ms
+2026-09-11 15:49:10 PDT | INFO | Correctness passed | seq_len=1024 | max_abs_error=0.000076
+2026-09-11 15:49:12 PDT | INFO | Timing validation | seq_len=1024 | operation=materialize | cuda_event=54.3514 ms | wall_clock=56.6554 ms | difference=2.3041 ms
+2026-09-11 15:49:12 PDT | INFO | Timing validation | seq_len=1024 | operation=contiguous_attention | cuda_event=0.1137 ms | wall_clock=0.1106 ms | difference=-0.0031 ms
+2026-09-11 15:49:15 PDT | INFO | Timing validation | seq_len=1024 | operation=materialized_path | cuda_event=56.0696 ms | wall_clock=58.8128 ms | difference=2.7432 ms
+2026-09-11 15:49:15 PDT | INFO | Timing validation | seq_len=1024 | operation=direct_paged | cuda_event=0.3548 ms | wall_clock=0.3539 ms | difference=-0.0009 ms
+2026-09-11 15:49:16 PDT | INFO | Correctness passed | seq_len=4096 | max_abs_error=0.000041
+2026-09-11 15:49:27 PDT | INFO | Timing validation | seq_len=4096 | operation=materialize | cuda_event=230.0559 ms | wall_clock=223.9585 ms | difference=-6.0974 ms
+2026-09-11 15:49:27 PDT | INFO | Timing validation | seq_len=4096 | operation=contiguous_attention | cuda_event=0.1137 ms | wall_clock=0.1081 ms | difference=-0.0056 ms
+2026-09-11 15:49:38 PDT | INFO | Timing validation | seq_len=4096 | operation=materialized_path | cuda_event=229.7574 ms | wall_clock=221.4772 ms | difference=-8.2803 ms
+2026-09-11 15:49:38 PDT | INFO | Timing validation | seq_len=4096 | operation=direct_paged | cuda_event=1.3184 ms | wall_clock=1.3222 ms | difference=0.0038 ms
+2026-09-11 15:49:38 PDT | INFO | Timing validation CSV written to benchmarks/results/paged_attention_timing_validation.csv

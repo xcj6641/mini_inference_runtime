@@ -287,3 +287,11 @@
 2026-09-04 23:48:49 PDT | INFO | Preparing benchmark: seq_len=4096
 2026-09-04 23:48:59 PDT | INFO | Correctness check passed: seq_len=4096
 2026-09-04 23:51:12 PDT | INFO | Materialize + attention: seq_len=4096, median=5314.660 ms
+2026-09-11 15:51:39 PDT | INFO | Preparing benchmark: seq_len=128
+2026-09-11 15:51:41 PDT | INFO | Correctness check passed: seq_len=128
+2026-09-11 15:51:45 PDT | INFO | Materialize + attention: seq_len=128, median=168.845 ms
+2026-09-11 15:51:45 PDT | INFO | Preparing benchmark: seq_len=512
+2026-09-11 15:51:46 PDT | INFO | Correctness check passed: seq_len=512
+2026-09-11 15:52:03 PDT | INFO | Materialize + attention: seq_len=512, median=664.061 ms
+2026-09-11 15:52:03 PDT | INFO | Preparing benchmark: seq_len=1024
+2026-09-11 15:52:06 PDT | INFO | Correctness check passed: seq_len=1024
