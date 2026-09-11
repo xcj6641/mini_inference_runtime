@@ -85,7 +85,6 @@ __global__ void paged_qk_kernel(
     }
 }
 
-
 __global__ void scaled_softmax_kernel(
     const float* scores,
     float* weights,
@@ -94,45 +93,48 @@ __global__ void scaled_softmax_kernel(
     int64_t head_dim
 ) {
     int kv_head = blockIdx.x;
-    int token_idx = threadIdx.x;
+    int thread_idx = threadIdx.x;
 
-    if (
-        kv_head >= num_kv_heads ||
-        token_idx >= num_tokens
-    ) {
+    if (kv_head >= num_kv_heads) {
         return;
     }
 
     extern __shared__ float shared_memory[];
 
-    float* shared_scores =
-        shared_memory;
-
+    float* shared_scores = shared_memory;
     float* shared_reduction =
         shared_memory + num_tokens;
-
-    int64_t score_offset =
-        token_idx * num_kv_heads
-        + kv_head;
 
     float scale =
         1.0f / sqrtf(
             static_cast<float>(head_dim)
         );
 
-    float scaled_score =
-        scores[score_offset] * scale;
+    // A fixed-size CUDA block can process more
+    // tokens than it has threads.
+    for (
+        int token_idx = thread_idx;
+        token_idx < num_tokens;
+        token_idx += blockDim.x
+    ) {
+        int64_t score_offset =
+            token_idx * num_kv_heads
+            + kv_head;
 
-    shared_scores[token_idx] =
-        scaled_score;
+        float scaled_score =
+            scores[score_offset] * scale;
 
-    shared_reduction[token_idx] =
-        scaled_score;
+        shared_scores[token_idx] =
+            scaled_score;
+
+        shared_reduction[token_idx] =
+            scaled_score;
+    }
 
     __syncthreads();
 
-    // Stable softmax: find max score.
-    if (token_idx == 0) {
+    // Stable softmax: serial maximum scan.
+    if (thread_idx == 0) {
         float max_score =
             shared_reduction[0];
 
@@ -141,11 +143,10 @@ __global__ void scaled_softmax_kernel(
             i < num_tokens;
             ++i
         ) {
-            max_score =
-                fmaxf(
-                    max_score,
-                    shared_reduction[i]
-                );
+            max_score = fmaxf(
+                max_score,
+                shared_reduction[i]
+            );
         }
 
         shared_reduction[0] =
@@ -157,18 +158,23 @@ __global__ void scaled_softmax_kernel(
     float max_score =
         shared_reduction[0];
 
-    float exp_score =
-        expf(
-            shared_scores[token_idx]
-            - max_score
-        );
-
-    shared_scores[token_idx] =
-        exp_score;
+    for (
+        int token_idx = thread_idx;
+        token_idx < num_tokens;
+        token_idx += blockDim.x
+    ) {
+        shared_scores[token_idx] =
+            expf(
+                shared_scores[token_idx]
+                - max_score
+            );
+    }
 
     __syncthreads();
 
-    if (token_idx == 0) {
+    // Intentionally serial for the naive
+    // Day 21 implementation.
+    if (thread_idx == 0) {
         float sum_exp = 0.0f;
 
         for (
@@ -189,9 +195,21 @@ __global__ void scaled_softmax_kernel(
     float sum_exp =
         shared_reduction[0];
 
-    weights[score_offset] =
-        exp_score / sum_exp;
+    for (
+        int token_idx = thread_idx;
+        token_idx < num_tokens;
+        token_idx += blockDim.x
+    ) {
+        int64_t score_offset =
+            token_idx * num_kv_heads
+            + kv_head;
+
+        weights[score_offset] =
+            shared_scores[token_idx]
+            / sum_exp;
+    }
 }
+
 
 
 __global__ void paged_weighted_value_kernel(
@@ -346,8 +364,10 @@ torch::Tensor paged_attention_cuda_forward(
         num_kv_heads
     );
 
+    constexpr int SOFTMAX_THREADS = 256;
+
     dim3 softmax_block(
-        num_tokens
+        SOFTMAX_THREADS
     );
 
     size_t shared_memory_bytes =

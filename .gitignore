@@ -1,7 +1,0 @@
-# Python
-.pytest_cache/
-__pycache__/
-.cache/
-models/
-Summary/**/BQ.md
-Summary/**/QA.md
