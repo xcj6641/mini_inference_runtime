@@ -10,6 +10,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
+import csv
+import time
 
 import torch
 
@@ -20,6 +22,7 @@ from app.runtime.paged_kv_cache import PagedKVCache
 SEQUENCE_LENGTHS = (128, 512, 1024, 2048, 4096)
 WARMUP_ITERS = 5
 BENCHMARK_ITERS = 20
+
 
 DEVICE = torch.device("cuda")
 DTYPE = torch.float16
@@ -35,6 +38,18 @@ RESULTS_DIR = Path("benchmarks/results")
 RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 LOG_PATH = RESULTS_DIR / "paged_attention_benchmark.log"
 CSV_PATH = RESULTS_DIR / "paged_attention_benchmark.csv"
+
+
+WALL_CLOCK_SEQUENCE_LENGTHS = (
+    128,
+    1024,
+    4096,
+)
+
+WALL_CLOCK_CSV_PATH = (
+    RESULTS_DIR
+    / "paged_attention_timing_validation.csv"
+)
 
 
 class PacificTimeFormatter(logging.Formatter):
@@ -71,8 +86,8 @@ logger = configure_logger()
 
 
 def benchmark_cuda_operation(
-    operation: Callable[[], Any],
-) -> dict[str, float]:
+        operation: Callable[[], Any],
+    ) -> dict[str, float]:
     for _ in range(WARMUP_ITERS):
         operation()
     torch.cuda.synchronize()
@@ -95,6 +110,45 @@ def benchmark_cuda_operation(
         "max_ms": max(latencies_ms),
     }
 
+def benchmark_wall_clock_operation(
+        operation: Callable[[], Any],
+    ) -> dict[str, float]:
+    # Warm up PyTorch, CUDA kernels, and the allocator.
+    for _ in range(WARMUP_ITERS):
+        operation()
+
+    torch.cuda.synchronize()
+
+    latencies_ms: list[float] = []
+
+    for _ in range(BENCHMARK_ITERS):
+        # Ensure no earlier CUDA work affects this iteration.
+        torch.cuda.synchronize()
+
+        start_time = time.perf_counter()
+
+        operation()
+
+        # Include the time needed for the operation's
+        # GPU work to finish.
+        torch.cuda.synchronize()
+
+        end_time = time.perf_counter()
+
+        latencies_ms.append(
+            (end_time - start_time) * 1000
+        )
+
+    return {
+        "median_ms": statistics.median(
+            latencies_ms
+        ),
+        "mean_ms": statistics.mean(
+            latencies_ms
+        ),
+        "min_ms": min(latencies_ms),
+        "max_ms": max(latencies_ms),
+    }
 
 def append_csv_row(row: dict[str, object]) -> None:
     file_exists = CSV_PATH.exists()
@@ -104,6 +158,26 @@ def append_csv_row(row: dict[str, object]) -> None:
             writer.writeheader()
         writer.writerow(row)
 
+def append_timing_validation_row(
+        row: dict[str, object],
+    ) -> None:
+    file_exists = (
+        WALL_CLOCK_CSV_PATH.exists()
+    )
+
+    with WALL_CLOCK_CSV_PATH.open(
+        "a",
+        newline="",
+    ) as file:
+        writer = csv.DictWriter(
+            file,
+            fieldnames=list(row.keys()),
+        )
+
+        if not file_exists:
+            writer.writeheader()
+
+        writer.writerow(row)
 
 def make_past_key_values(seq_len: int):
     layers = []
@@ -166,10 +240,10 @@ def make_fixture(seq_len: int):
 
 
 def contiguous_attention(
-    query: torch.Tensor,
-    key: torch.Tensor,
-    value: torch.Tensor,
-) -> torch.Tensor:
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+    ) -> torch.Tensor:
     query_4d = query.unsqueeze(2)
     scores = torch.matmul(
         query_4d,
@@ -180,13 +254,13 @@ def contiguous_attention(
 
 
 def check_correctness(
-    *,
-    seq_len: int,
-    cache: PagedKVCache,
-    block_table_list: list[int],
-    block_table_tensor: torch.Tensor,
-    query: torch.Tensor,
-) -> tuple[torch.Tensor, torch.Tensor]:
+        *,
+        seq_len: int,
+        cache: PagedKVCache,
+        block_table_list: list[int],
+        block_table_tensor: torch.Tensor,
+        query: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
     materialized = cache.materialize_request_kv(
         block_table=block_table_list,
         num_tokens=seq_len,
@@ -344,6 +418,154 @@ def run_case(seq_len: int) -> dict[str, object]:
     )
     return row
 
+def run_timing_validation_case(
+        seq_len: int,
+    ) -> dict[str, object]:
+    (
+        cache,
+        block_table_list,
+        block_table_tensor,
+        query,
+    ) = make_fixture(seq_len)
+
+    key, value = check_correctness(
+        seq_len=seq_len,
+        cache=cache,
+        block_table_list=block_table_list,
+        block_table_tensor=block_table_tensor,
+        query=query,
+    )
+
+    def materialize_operation():
+        return cache.materialize_request_kv(
+            block_table=block_table_list,
+            num_tokens=seq_len,
+        )
+
+    def contiguous_operation():
+        return contiguous_attention(
+            query,
+            key,
+            value,
+        )
+
+    def materialized_path_operation():
+        materialized = (
+            cache.materialize_request_kv(
+                block_table=block_table_list,
+                num_tokens=seq_len,
+            )
+        )
+
+        current_key, current_value = (
+            materialized[LAYER_IDX]
+        )
+
+        return contiguous_attention(
+            query,
+            current_key,
+            current_value,
+        )
+
+    def direct_paged_operation():
+        return paged_attention(
+            query=query,
+            key_cache=cache.key_cache,
+            value_cache=cache.value_cache,
+            block_table=block_table_tensor,
+            num_tokens=seq_len,
+            layer_idx=LAYER_IDX,
+        )
+
+    operations = {
+        "materialize": materialize_operation,
+        "contiguous_attention":
+            contiguous_operation,
+        "materialized_path":
+            materialized_path_operation,
+        "direct_paged":
+            direct_paged_operation,
+    }
+
+    results: dict[
+        str,
+        dict[str, dict[str, float]],
+    ] = {}
+
+    for operation_name, operation in (
+        operations.items()
+    ):
+        cuda_event_stats = (
+            benchmark_cuda_operation(
+                operation
+            )
+        )
+
+        wall_clock_stats = (
+            benchmark_wall_clock_operation(
+                operation
+            )
+        )
+
+        results[operation_name] = {
+            "cuda_event": cuda_event_stats,
+            "wall_clock": wall_clock_stats,
+        }
+
+        logger.info(
+            "Timing validation | "
+            "seq_len=%d | "
+            "operation=%s | "
+            "cuda_event=%.4f ms | "
+            "wall_clock=%.4f ms | "
+            "difference=%.4f ms",
+            seq_len,
+            operation_name,
+            cuda_event_stats["median_ms"],
+            wall_clock_stats["median_ms"],
+            (
+                wall_clock_stats["median_ms"]
+                - cuda_event_stats["median_ms"]
+            ),
+        )
+
+    row: dict[str, object] = {
+        "seq_len": seq_len,
+        "warmup_iters": WARMUP_ITERS,
+        "benchmark_iters": BENCHMARK_ITERS,
+    }
+
+    for operation_name, operation_results in (
+        results.items()
+    ):
+        cuda_stats = operation_results[
+            "cuda_event"
+        ]
+        wall_stats = operation_results[
+            "wall_clock"
+        ]
+
+        row[
+            f"{operation_name}"
+            "_cuda_event_median_ms"
+        ] = cuda_stats["median_ms"]
+
+        row[
+            f"{operation_name}"
+            "_wall_clock_median_ms"
+        ] = wall_stats["median_ms"]
+
+        row[
+            f"{operation_name}"
+            "_wall_over_cuda_ratio"
+        ] = (
+            wall_stats["median_ms"]
+            / cuda_stats["median_ms"]
+        )
+
+    append_timing_validation_row(row)
+
+    return row
 
 def main() -> None:
     if not torch.cuda.is_available():
@@ -357,6 +579,33 @@ def main() -> None:
         run_case(seq_len)
     logger.info("Benchmark CSV written to %s", CSV_PATH)
 
+# start.record() does not immediately read a CPU clock. It inserts a timing event into the current CUDA stream.
+
+# Likewise, end.record() inserts another event after the CUDA operations launched by operation().
+def timing_validation_main() -> None:
+    if not torch.cuda.is_available():
+        raise RuntimeError(
+            "CUDA is required"
+        )
+
+    logger.info(
+        "Starting timing validation | "
+        "sequence_lengths=%s",
+        WALL_CLOCK_SEQUENCE_LENGTHS,
+    )
+
+    for seq_len in (
+        WALL_CLOCK_SEQUENCE_LENGTHS
+    ):
+        run_timing_validation_case(
+            seq_len
+        )
+
+    logger.info(
+        "Timing validation CSV written to %s",
+        WALL_CLOCK_CSV_PATH,
+    )
 
 if __name__ == "__main__":
-    main()
+    # main()
+    timing_validation_main()

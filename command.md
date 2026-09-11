@@ -15,3 +15,8 @@ test/runtime/test_model_runner.py::test_real_prefill_returns_logits \
 ## verify the markers
 python -m pytest --collect-only -q
 python -m pytest --collect-only -m "not integration" -q
+
+
+## copy files from the server
+scp user@remote-server:/path/to/file.tar.gz .
+scp local-file user@server-ip:/remote/path/

@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "minillm-runtime"
+version = "0.1.0"
+description = "A from-scratch LLM inference runtime prototype with continuous batching, paged KV caching, prefix caching, and CUDA PagedAttention."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "torch>=2.5,<2.6",
+    "transformers>=4.46,<4.47",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=9.1,<10",
+]
+benchmark = [
+    "matplotlib>=3.11,<4",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["app*"]
+namespaces = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "integration: tests requiring a real model",
+]

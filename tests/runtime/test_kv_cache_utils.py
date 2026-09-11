@@ -13,6 +13,8 @@ from app.runtime.kv_cache_utils import (
     get_cuda_memory_snapshot,
     get_kv_sequence_length,
     inspect_legacy_kv_cache,
+    split_legacy_kv_cache,
+    stack_legacy_kv_caches,
 )
 
 
