@@ -1,1 +1,0 @@
-The current softmax launch uses num_tokens threads in one block. seq_len=2048 is an invalid CUDA launch because a block cannot have 2048 threads.
