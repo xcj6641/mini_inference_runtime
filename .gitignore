@@ -1,8 +1,0 @@
-# Python
-
-.gitignore
-.pytest_cache/
-__pycache__/
-.cache/
-Summary/**/BQ.md
-Summary/**/QA.md
