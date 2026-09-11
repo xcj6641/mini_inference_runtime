@@ -206,19 +206,25 @@ python -m app.benchmarks.static_batch_benchmark
 Paged KV materialization benchmark:
 
 ```bash
-python benchmarks/benchmark_materialize.py
+
+python -m benchmarks.benchmark_materialize
+
 ```
 
 Direct CUDA PagedAttention benchmark:
 
 ```bash
-python benchmarks/benchmark_paged_attention.py
+
+python -m benchmarks.benchmark_paged_attention
+
 ```
 
 Analyze saved materialization results and generate the plot:
 
 ```bash
-python benchmarks/analyze_materialize.py
+
+python -m benchmarks.analyze_materialize
+
 ```
 
 Benchmark CSV files, logs, plots, and methodology notes are stored under `benchmarks/results/`.

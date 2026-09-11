@@ -95,6 +95,7 @@
 2026-09-11 12:03:24 PDT | INFO | Timing validation | seq_len=4096 | operation=materialized_path | cuda_event=215.8812 ms | wall_clock=216.1464 ms | difference=0.2652 ms
 2026-09-11 12:03:24 PDT | INFO | Timing validation | seq_len=4096 | operation=direct_paged | cuda_event=1.3189 ms | wall_clock=1.3227 ms | difference=0.0038 ms
 2026-09-11 12:03:24 PDT | INFO | Timing validation CSV written to benchmarks/results/paged_attention_timing_validation.csv
+<<<<<<< HEAD
 2026-09-11 15:49:09 PDT | INFO | Starting timing validation | sequence_lengths=(128, 1024, 4096)
 2026-09-11 15:49:09 PDT | INFO | Correctness passed | seq_len=128 | max_abs_error=0.000157
 2026-09-11 15:49:09 PDT | INFO | Timing validation | seq_len=128 | operation=materialize | cuda_event=6.8516 ms | wall_clock=6.8419 ms | difference=-0.0097 ms
@@ -112,3 +113,5 @@
 2026-09-11 15:49:38 PDT | INFO | Timing validation | seq_len=4096 | operation=materialized_path | cuda_event=229.7574 ms | wall_clock=221.4772 ms | difference=-8.2803 ms
 2026-09-11 15:49:38 PDT | INFO | Timing validation | seq_len=4096 | operation=direct_paged | cuda_event=1.3184 ms | wall_clock=1.3222 ms | difference=0.0038 ms
 2026-09-11 15:49:38 PDT | INFO | Timing validation CSV written to benchmarks/results/paged_attention_timing_validation.csv
+=======
+>>>>>>> dev
